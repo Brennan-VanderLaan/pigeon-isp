@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { Board, DIRS, COLS, ROWS } from './board';
 import { filterExit } from './filters';
+import { hubExits, meterStep, switchStep } from './machines';
 import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
 import type { Bridge, FrameToken } from '../types';
 
@@ -36,20 +37,26 @@ const bodyMat = new THREE.MeshStandardMaterial({ color: 0xb9c2cc, roughness: 0.7
 const headMat = new THREE.MeshStandardMaterial({ color: 0x9aa5b1, roughness: 0.7 });
 const beakMat = new THREE.MeshStandardMaterial({ color: 0xffa940, roughness: 0.6 });
 
+/** Machines that fan out (hub, switch flood) ask the manager to clone. */
+export interface PigeonCtx {
+  clone(p: Pigeon, dir: number): void;
+}
+
 export class Pigeon {
   mesh!: THREE.Group;
   decoded: Decoded;
   state: 'waiting' | 'riding' = 'waiting';
   col: number;
   row: number;
+  travelDir = 0; // direction of the current/last segment
   private fromPos = new THREE.Vector3();
   private toPos = new THREE.Vector3();
   private toCell: { col: number; row: number } | null = null;
   private progress = 0;
   private bobPhase = Math.random() * Math.PI * 2;
 
-  constructor(readonly token: FrameToken, col: number, row: number) {
-    this.decoded = decodeFrame(token.snapshot, token.fullLen);
+  constructor(readonly token: FrameToken, col: number, row: number, decoded?: Decoded) {
+    this.decoded = decoded ?? decodeFrame(token.snapshot, token.fullLen);
     this.col = col;
     this.row = row;
   }
@@ -67,11 +74,11 @@ export class Pigeon {
   }
 
   /** Returns the portId to deliver to when the pigeon lands. */
-  update(dt: number, board: Board): number | null {
+  update(dt: number, board: Board, ctx: PigeonCtx): number | null {
     if (this.state === 'waiting') {
       this.bobPhase += dt * 6;
       this.mesh.position.y = 0.22 + Math.abs(Math.sin(this.bobPhase)) * 0.05;
-      const out = this.exitDirFrom(board, this.col, this.row);
+      const out = this.exitDirFrom(board, this.col, this.row, ctx);
       if (out === null || !this.beginSegment(board, out)) return null;
       this.state = 'riding';
       // fall through: a fast pigeon shouldn't waste this tick standing up
@@ -91,7 +98,7 @@ export class Pigeon {
       if (here?.type === 'landing') {
         return here.port.id; // touched down: deliver
       }
-      const out = this.exitDirFrom(board, this.col, this.row);
+      const out = this.exitDirFrom(board, this.col, this.row, ctx);
       if (out === null || !this.beginSegment(board, out)) {
         this.state = 'waiting';
         this.progress = 0;
@@ -106,8 +113,9 @@ export class Pigeon {
     return null;
   }
 
-  /** Which way does the machinery at (col,row) send THIS pigeon? */
-  private exitDirFrom(board: Board, col: number, row: number): number | null {
+  /** Which way does the machinery at (col,row) send THIS pigeon? Fan-out
+   *  machines route this pigeon to exits[0] and clone for the rest. */
+  private exitDirFrom(board: Board, col: number, row: number, ctx: PigeonCtx): number | null {
     const cell = board.cellAt(col, row);
     if (!cell) return null;
     switch (cell.type) {
@@ -127,6 +135,21 @@ export class Pigeon {
         cell.lastFrame = this.token.snapshot;
         return exit;
       }
+      case 'hub': {
+        cell.count++;
+        const exits = hubExits(this.travelDir);
+        for (let i = 1; i < exits.length; i++) ctx.clone(this, exits[i]);
+        return exits[0];
+      }
+      case 'switch': {
+        const d = switchStep(cell.state, this.decoded, this.travelDir, performance.now());
+        for (let i = 1; i < d.exits.length; i++) ctx.clone(this, d.exits[i]);
+        return d.exits[0];
+      }
+      case 'meter': {
+        const d = meterStep(cell.state, performance.now());
+        return d.over ? cell.overflowDir : cell.defaultDir;
+      }
       case 'roost':
         return cell.facing;
       case 'landing':
@@ -144,9 +167,19 @@ export class Pigeon {
     const here = board.cellAt(this.col, this.row);
     if (here?.type === 'roost' && target === undefined) return false; // wait for machinery
     this.toCell = { col: toCol, row: toRow };
+    this.travelDir = dir;
     this.fromPos.copy(board.cellToWorld(this.col, this.row, 0.22));
     this.toPos.copy(board.cellToWorld(toCol, toRow, 0.22));
     this.mesh.rotation.y = Math.atan2(this.toPos.x - this.fromPos.x, this.toPos.z - this.fromPos.z);
+    return true;
+  }
+
+  /** Clones leave their birth machine immediately along `dir` — they must
+   *  NOT re-evaluate the machine that spawned them (infinite fan-out).
+   *  False = nowhere to go; the clone is stillborn and gets unref'd. */
+  forceExit(board: Board, dir: number): boolean {
+    if (!this.beginSegment(board, dir)) return false;
+    this.state = 'riding';
     return true;
   }
 }
@@ -158,6 +191,11 @@ export class PigeonManager {
   private queue: FrameToken[] = [];
   private pool: THREE.Group[] = [];
   private onDeliver: (pigeon: Pigeon, portId: number) => void;
+  /** Clones share one buffered frame: refcounted release. The frame is
+   *  copy-delivered while siblings remain; the LAST resolution consumes
+   *  (deliver) or frees (drop). No silent paths, even on the floor. */
+  private frameRefs = new Map<number, number>();
+  private cloneBacklog: { p: Pigeon; dir: number }[] = [];
 
   constructor(
     scene: THREE.Scene,
@@ -185,6 +223,14 @@ export class PigeonManager {
     return this.queue.length;
   }
 
+  private ctx: PigeonCtx = {
+    clone: (p, dir) => {
+      // Deferred to after the update sweep — never mutate the pigeon list
+      // mid-iteration. Population cap applies to clones too.
+      this.cloneBacklog.push({ p, dir });
+    },
+  };
+
   update(dt: number): void {
     // Inject ALL available frames into the simulation (up to the live-entity
     // cap; at high speed the floor drains in the same tick, so the queue
@@ -195,13 +241,59 @@ export class PigeonManager {
 
     for (let i = this.pigeons.length - 1; i >= 0; i--) {
       const p = this.pigeons[i];
-      const deliveredTo = p.update(dt, this.board);
+      const deliveredTo = p.update(dt, this.board, this.ctx);
       if (deliveredTo !== null) {
         this.pigeons.splice(i, 1);
         this.releaseMesh(p.mesh);
-        this.bridge().deliver(deliveredTo, p.token.id);
+        this.resolve(p.token.id, deliveredTo);
         this.onDeliver(p, deliveredTo);
       }
+    }
+
+    if (this.cloneBacklog.length > 0) {
+      const backlog = this.cloneBacklog;
+      this.cloneBacklog = [];
+      for (const { p, dir } of backlog) {
+        if (this.pigeons.length >= MAX_PIGEONS) {
+          this.unref(p.token.id); // clone never born: release its share
+          continue;
+        }
+        const refs = this.frameRefs.get(p.token.id) ?? 0;
+        if (refs === 0) continue; // frame already fully resolved this tick
+        const clone = new Pigeon(p.token, p.col, p.row, p.decoded);
+        clone.attachMesh(this.acquireMesh(KIND_COLORS[p.decoded.kind]), this.board);
+        if (!clone.forceExit(this.board, dir)) {
+          this.releaseMesh(clone.mesh); // stillborn: exit blocked
+          continue;
+        }
+        this.frameRefs.set(p.token.id, refs + 1);
+        this.pigeons.push(clone);
+      }
+    }
+  }
+
+  /** A pigeon resolved at a landing: copy-deliver while siblings remain,
+   *  plain deliver (consume) for the last one. */
+  private resolve(frameId: number, portId: number): void {
+    const refs = this.frameRefs.get(frameId) ?? 1;
+    if (refs > 1) {
+      this.frameRefs.set(frameId, refs - 1);
+      this.bridge().copyDeliver(portId, frameId);
+    } else {
+      this.frameRefs.delete(frameId);
+      this.bridge().deliver(portId, frameId);
+    }
+  }
+
+  /** A pigeon (or unborn clone) is discarded: drop only when last. */
+  private unref(frameId: number): void {
+    const refs = this.frameRefs.get(frameId) ?? 1;
+    if (refs > 1) {
+      this.frameRefs.set(frameId, refs - 1);
+    } else {
+      this.frameRefs.delete(frameId);
+      this.bridge().drop(frameId);
+      this.droppedByMe++;
     }
   }
 
@@ -214,6 +306,7 @@ export class PigeonManager {
     }
     const p = new Pigeon(token, loc.roost.col, loc.roost.row);
     p.attachMesh(this.acquireMesh(KIND_COLORS[p.decoded.kind]), this.board);
+    this.frameRefs.set(token.id, 1);
     this.pigeons.push(p);
   }
 

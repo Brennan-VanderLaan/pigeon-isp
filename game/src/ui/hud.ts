@@ -7,7 +7,7 @@ import {
 import { hexDump, type Decoded } from '../net/decode';
 import type { FrameToken } from '../types';
 
-export type Tool = 'select' | 'belt' | 'filter' | 'erase';
+export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'erase';
 
 export interface FilterPanelState {
   config: FilterConfig;
@@ -294,6 +294,85 @@ export class Hud {
       clearInterval(this.filterTimer);
       this.filterTimer = null;
     }
+  }
+
+  // ---- machine inspectors (switch CAM table, meter, hub) -----------------------
+
+  /** Live CAM table view — the switch's brain, visible. */
+  openSwitchPanel(live: () => { rows: { mac: string; dir: number; ageS: number; hits: number }[]; floods: number; forwards: number; ttlMs: number } | null): void {
+    this.closeFilterPanel();
+    this.filterPanel.style.display = 'block';
+    const render = () => {
+      const lv = live();
+      if (!lv) return;
+      const rows = lv.rows
+        .map((r) => `<tr><td>${esc(r.mac)}</td><td>${DIR_ARROWS[r.dir]} ${DIR_NAMES[r.dir]}</td><td>${r.ageS}s</td><td>${r.hits}</td></tr>`)
+        .join('');
+      this.filterPanel.innerHTML = `
+        <h3>⇄ switch — CAM table</h3>
+        <div class="hint2">learns src MAC → entry side · forwards known dst · floods unknown/broadcast · TTL ${lv.ttlMs / 1000}s</div>
+        <table class="grid"><tr><th>mac</th><th>exit</th><th>age</th><th>hits</th></tr>${rows || ''}</table>
+        ${rows ? '' : '<div class="hint2">empty — no frames learned yet</div>'}
+        <div class="hint2" style="margin-top:8px">forwards ${lv.forwards} · floods ${lv.floods}</div>
+        <div class="row"><button id="fc-close">Close</button></div>`;
+      this.filterPanel.querySelector('#fc-close')!.addEventListener('click', () => this.closeFilterPanel());
+    };
+    render();
+    this.filterTimer = window.setInterval(render, 800);
+  }
+
+  openMeterPanel(
+    state: { thresholdPps: number; defaultDir: number; overflowDir: number },
+    onApply: (thresholdPps: number, defaultDir: number, overflowDir: number) => void,
+    live: () => { rate: number; total: number; overTotal: number } | null,
+  ): void {
+    this.closeFilterPanel();
+    this.filterPanel.style.display = 'block';
+    const dirOpts = (sel: number) => DIR_NAMES.map((n, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${n}</option>`).join('');
+    this.filterPanel.innerHTML = `
+      <h3>◔ meter — rate limiter</h3>
+      <div class="hint2">frames within the rate take the normal exit; over-threshold traffic takes the overflow exit</div>
+      <div class="row">
+        <label style="margin:0">threshold</label>
+        <input type="number" id="mt-th" value="${state.thresholdPps}" min="1" style="width:90px"> pps
+      </div>
+      <div class="row">
+        <label style="margin:0">normal exit</label><select id="mt-dd" style="width:auto">${dirOpts(state.defaultDir)}</select>
+        <label style="margin:0">overflow exit</label><select id="mt-od" style="width:auto">${dirOpts(state.overflowDir)}</select>
+      </div>
+      <div class="row"><button id="mt-apply">Apply</button><button id="fc-close">Close</button><span class="err" id="mt-ok"></span></div>
+      <div class="hint2" id="mt-live" style="margin-top:8px"></div>`;
+    const q = <T extends HTMLElement>(s: string) => this.filterPanel.querySelector<T>(s)!;
+    q('#mt-apply').addEventListener('click', () => {
+      onApply(
+        Math.max(1, Number(q<HTMLInputElement>('#mt-th').value)),
+        Number(q<HTMLSelectElement>('#mt-dd').value),
+        Number(q<HTMLSelectElement>('#mt-od').value),
+      );
+      q('#mt-ok').textContent = '✓ set';
+    });
+    q('#fc-close').addEventListener('click', () => this.closeFilterPanel());
+    const renderLive = () => {
+      const lv = live();
+      if (lv) q('#mt-live').textContent = `rate ${lv.rate} pps · total ${lv.total} · over-rate ${lv.overTotal}`;
+    };
+    renderLive();
+    this.filterTimer = window.setInterval(renderLive, 600);
+  }
+
+  openHubPanel(live: () => number | null): void {
+    this.closeFilterPanel();
+    this.filterPanel.style.display = 'block';
+    const render = () => {
+      this.filterPanel.innerHTML = `
+        <h3>✳ hub — dumb repeater</h3>
+        <div class="hint2">every frame is duplicated out every exit except the one it came in. The 90s called; they want their collision domain back.</div>
+        <div class="hint2" style="margin-top:8px">frames repeated: ${live() ?? '?'}</div>
+        <div class="row"><button id="fc-close">Close</button></div>`;
+      this.filterPanel.querySelector('#fc-close')!.addEventListener('click', () => this.closeFilterPanel());
+    };
+    render();
+    this.filterTimer = window.setInterval(render, 1000);
   }
 }
 

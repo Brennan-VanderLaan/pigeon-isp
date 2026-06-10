@@ -8,7 +8,9 @@
 //                   MAC-learning software switch and delivers every token
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
-import { Board, makeGhostBelt, makeGhostFilter, orientGhost } from './game/board';
+import * as THREE from 'three';
+import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, makeGhostSwitch, orientGhost } from './game/board';
+import { camRows } from './game/machines';
 import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
@@ -176,21 +178,25 @@ let ejectSide: 1 | -1 = 1;
 let painting = false;
 let erasing = false;
 
-const beltGhost = makeGhostBelt();
-const filterGhost = makeGhostFilter();
-beltGhost.visible = false;
-filterGhost.visible = false;
-world.scene.add(beltGhost);
-world.scene.add(filterGhost);
+const ghosts: Record<string, THREE.Group> = {
+  belt: makeGhostBelt(),
+  filter: makeGhostFilter(),
+  hub: makeGhostHub(),
+  switch: makeGhostSwitch(),
+  meter: makeGhostMeter(),
+};
+for (const g of Object.values(ghosts)) {
+  g.visible = false;
+  world.scene.add(g);
+}
 
-function activeGhost() {
-  return tool === 'belt' ? beltGhost : tool === 'filter' ? filterGhost : null;
+function activeGhost(): THREE.Group | null {
+  return ghosts[tool] ?? null;
 }
 
 hud.onToolChange = (t) => {
   tool = t;
-  beltGhost.visible = false;
-  filterGhost.visible = false;
+  for (const g of Object.values(ghosts)) g.visible = false;
   if (t !== 'select') hud.closeFilterPanel();
 };
 hud.setTool('belt');
@@ -206,17 +212,39 @@ hud.bindClearFloor(() => {
   hud.log('pigeon-isp', 'floor bulldozed');
 });
 
-function openFilterEditor(col: number, row: number): void {
+function openMachineInspector(col: number, row: number): void {
   const cell = board.cellAt(col, row);
-  if (cell?.type !== 'filter') return;
-  hud.openFilterPanel(
-    { config: cell.config, matchDir: cell.matchDir, defaultDir: cell.defaultDir, error: cell.compiled.error },
-    (s) => board.configureFilter(col, row, s.config, s.matchDir, s.defaultDir),
-    () => {
+  if (!cell) return;
+  if (cell.type === 'filter') {
+    hud.openFilterPanel(
+      { config: cell.config, matchDir: cell.matchDir, defaultDir: cell.defaultDir, error: cell.compiled.error },
+      (s) => board.configureFilter(col, row, s.config, s.matchDir, s.defaultDir),
+      () => {
+        const c = board.cellAt(col, row);
+        return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
+      },
+    );
+  } else if (cell.type === 'switch') {
+    hud.openSwitchPanel(() => {
       const c = board.cellAt(col, row);
-      return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
-    },
-  );
+      if (c?.type !== 'switch') return null;
+      return { rows: camRows(c.state, performance.now()), floods: c.state.floods, forwards: c.state.forwards, ttlMs: c.state.ttlMs };
+    });
+  } else if (cell.type === 'meter') {
+    hud.openMeterPanel(
+      { thresholdPps: cell.state.thresholdPps, defaultDir: cell.defaultDir, overflowDir: cell.overflowDir },
+      (th, dd, od) => board.configureMeter(col, row, th, dd, od),
+      () => {
+        const c = board.cellAt(col, row);
+        return c?.type === 'meter' ? { rate: c.state.lastRate, total: c.state.total, overTotal: c.state.overTotal } : null;
+      },
+    );
+  } else if (cell.type === 'hub') {
+    hud.openHubPanel(() => {
+      const c = board.cellAt(col, row);
+      return c?.type === 'hub' ? c.count : null;
+    });
+  }
 }
 
 function paintAtPointer(): void {
@@ -225,6 +253,7 @@ function paintAtPointer(): void {
   const cell = board.worldToCell(hit);
   if (!cell) return;
   if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
+  if (tool === 'hub' && painting) board.setHub(cell.col, cell.row);
   if (tool === 'erase' && erasing) board.eraseMachine(cell.col, cell.row);
 }
 
@@ -260,12 +289,12 @@ window.addEventListener('pointerdown', (e) => {
       hud.inspect(p.decoded, p.token);
       return;
     }
-    const fhit = world.pickObjects(board.filterMeshes());
+    const fhit = world.pickObjects(board.machineMeshes());
     let fobj = fhit?.object ?? null;
     while (fobj && !fobj.userData.boardCell) fobj = fobj.parent;
     if (fobj?.userData.boardCell) {
       const { col, row } = fobj.userData.boardCell;
-      openFilterEditor(col, row);
+      openMachineInspector(col, row);
       return;
     }
     hud.closeInspector();
@@ -283,11 +312,21 @@ window.addEventListener('pointerdown', (e) => {
       // which side) — both editable in the panel that opens right away.
       const matchDir = (buildDir + ejectSide + 4) % 4;
       board.setFilter(cell.col, cell.row, matchDir, buildDir);
-      openFilterEditor(cell.col, cell.row);
+      openMachineInspector(cell.col, cell.row);
     }
     return;
   }
-  painting = tool === 'belt';
+  if (tool === 'switch' || tool === 'meter') {
+    const hit = world.pickGround();
+    const cell = hit ? board.worldToCell(hit) : null;
+    if (cell) {
+      if (tool === 'switch') board.setSwitch(cell.col, cell.row);
+      else board.setMeter(cell.col, cell.row, buildDir, (buildDir + ejectSide + 4) % 4);
+      openMachineInspector(cell.col, cell.row);
+    }
+    return;
+  }
+  painting = tool === 'belt' || tool === 'hub';
   erasing = tool === 'erase';
   paintAtPointer();
 });
@@ -302,7 +341,10 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '1') hud.setTool('select');
   if (e.key === '2') hud.setTool('belt');
   if (e.key === '3') hud.setTool('filter');
-  if (e.key === '4') hud.setTool('erase');
+  if (e.key === '4') hud.setTool('hub');
+  if (e.key === '5') hud.setTool('switch');
+  if (e.key === '6') hud.setTool('meter');
+  if (e.key === '7') hud.setTool('erase');
   if (e.key === 'r' || e.key === 'R') {
     buildDir = (buildDir + 1) % 4;
     const ghost = activeGhost();
@@ -334,6 +376,7 @@ function frame(now: number): void {
   fpsCount++;
   if (now - fpsWindow >= 1000) {
     hud.setFps(fpsCount);
+    board.updateBadges();
     const mbps = (bytesThisSecond * 8) / 1e6;
     const decideUs = decideCount > 0 ? decideUsSum / decideCount : null;
     hud.setStats(portsById.size, currentPps || tokensThisSecond, mbps, pigeons.pigeons.length, pigeons.queued(), totalDrops, decideUs);

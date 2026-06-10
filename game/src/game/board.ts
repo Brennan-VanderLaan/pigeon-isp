@@ -12,9 +12,10 @@ import {
   DIR_ARROWS, compileFilter, describeFilter, legacyExits, newFilterStats,
   type CompiledFilter, type FilterConfig, type FilterStats,
 } from './filters';
+import { newMeterState, newSwitchState, type MeterState, type SwitchState } from './machines';
 
-export const COLS = 24;
-export const ROWS = 14;
+export const COLS = 28;
+export const ROWS = 16;
 export const CELL = 1;
 
 /** 0=+x (east), 1=+z (south), 2=-x (west), 3=-z (north) */
@@ -32,6 +33,9 @@ export type Cell =
       config: FilterConfig; compiled: CompiledFilter; mesh: THREE.Group;
       stats: FilterStats; lastFrame?: Uint8Array;
     }
+  | { type: 'hub'; count: number; mesh: THREE.Group }
+  | { type: 'switch'; state: SwitchState; mesh: THREE.Group }
+  | { type: 'meter'; state: MeterState; defaultDir: number; overflowDir: number; mesh: THREE.Group }
   | { type: 'roost'; port: PortInfo; facing: number; mesh: THREE.Group }
   | { type: 'landing'; port: PortInfo; mesh: THREE.Group };
 
@@ -41,15 +45,21 @@ export interface PortLoc {
   facing: number;
 }
 
-// Roost/landing pairs around the perimeter (roost first, landing beside it).
-const SLOTS: PortLoc[] = [
-  { roost: { col: 0, row: 3 }, landing: { col: 0, row: 5 }, facing: 0 },
-  { roost: { col: COLS - 1, row: 3 }, landing: { col: COLS - 1, row: 5 }, facing: 2 },
-  { roost: { col: 0, row: 9 }, landing: { col: 0, row: 11 }, facing: 0 },
-  { roost: { col: COLS - 1, row: 9 }, landing: { col: COLS - 1, row: 11 }, facing: 2 },
-  { roost: { col: 10, row: 0 }, landing: { col: 12, row: 0 }, facing: 1 },
-  { roost: { col: 10, row: ROWS - 1 }, landing: { col: 12, row: ROWS - 1 }, facing: 3 },
-];
+// Roost/landing pairs around the perimeter (roost first, landing two cells
+// over), generated: 2 pairs per edge = 8 hosts. The sandbox spawns hosts at
+// runtime; the floor has to keep up.
+const SLOTS: PortLoc[] = (() => {
+  const out: PortLoc[] = [];
+  for (const row of [3, 10]) {
+    out.push({ roost: { col: 0, row }, landing: { col: 0, row: row + 2 }, facing: 0 });
+    out.push({ roost: { col: COLS - 1, row }, landing: { col: COLS - 1, row: row + 2 }, facing: 2 });
+  }
+  for (const col of [9, 17]) {
+    out.push({ roost: { col, row: 0 }, landing: { col: col + 2, row: 0 }, facing: 1 });
+    out.push({ roost: { col, row: ROWS - 1 }, landing: { col: col + 2, row: ROWS - 1 }, facing: 3 });
+  }
+  return out;
+})();
 
 const STORE_KEY = 'pigeon-isp-floor-v1';
 
@@ -153,13 +163,68 @@ export class Board {
     return c.compiled.error;
   }
 
+  setHub(col: number, row: number): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    const mesh = makeHubMesh();
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'hub', count: 0, mesh });
+    this.onChange();
+  }
+
+  setSwitch(col: number, row: number, ttlMs = 30_000): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    const mesh = makeSwitchMesh();
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'switch', state: newSwitchState(ttlMs), mesh });
+    this.onChange();
+  }
+
+  setMeter(col: number, row: number, defaultDir: number, overflowDir: number, thresholdPps = 100): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    const mesh = makeMeterMesh(defaultDir, overflowDir);
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), {
+      type: 'meter', state: newMeterState(thresholdPps), defaultDir, overflowDir, mesh,
+    });
+    this.onChange();
+  }
+
+  configureMeter(col: number, row: number, thresholdPps: number, defaultDir: number, overflowDir: number): void {
+    const c = this.cells.get(key(col, row));
+    if (c?.type !== 'meter') return;
+    c.state.thresholdPps = thresholdPps;
+    if (c.defaultDir !== defaultDir || c.overflowDir !== overflowDir) {
+      c.defaultDir = defaultDir;
+      c.overflowDir = overflowDir;
+      this.group.remove(c.mesh);
+      c.mesh = makeMeterMesh(defaultDir, overflowDir);
+      c.mesh.position.copy(this.cellToWorld(col, row, 0.04));
+      c.mesh.userData.boardCell = { col, row };
+      this.group.add(c.mesh);
+    }
+    this.onChange();
+  }
+
   eraseMachine(col: number, row: number): void {
     if (this.removeMachine(col, row)) this.onChange();
   }
 
+  private static isMachine(t: string): boolean {
+    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'switch' || t === 'meter';
+  }
+
   private removeMachine(col: number, row: number): boolean {
     const existing = this.cells.get(key(col, row));
-    if (existing?.type !== 'belt' && existing?.type !== 'filter') return false;
+    if (!existing || !Board.isMachine(existing.type)) return false;
     this.group.remove(existing.mesh);
     this.cells.delete(key(col, row));
     return true;
@@ -167,15 +232,34 @@ export class Board {
 
   private clearForBuild(col: number, row: number): boolean {
     const existing = this.cells.get(key(col, row));
-    return existing === undefined || existing.type === 'belt' || existing.type === 'filter';
+    return existing === undefined || Board.isMachine(existing.type);
   }
 
-  filterMeshes(): THREE.Object3D[] {
+  /** Meshes of machines with config/inspector panels (select-click). */
+  machineMeshes(): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
     for (const c of this.cells.values()) {
-      if (c.type === 'filter') out.push(c.mesh);
+      if (c.type === 'filter' || c.type === 'hub' || c.type === 'switch' || c.type === 'meter') out.push(c.mesh);
     }
     return out;
+  }
+
+  /** Refresh floor badges (entry counts, rates) — called a few times/sec. */
+  updateBadges(): void {
+    const now = performance.now();
+    for (const c of this.cells.values()) {
+      if (c.type === 'switch') {
+        let live = 0;
+        for (const e of c.state.table.values()) {
+          if (now - e.learnedAt <= c.state.ttlMs) live++;
+        }
+        setBadge(c.mesh, `${live} macs`, '#53d8e8');
+      } else if (c.type === 'meter') {
+        setBadge(c.mesh, `${c.state.lastRate}/${c.state.thresholdPps} pps`, c.state.lastRate > c.state.thresholdPps ? '#ff6b6b' : '#6fdc8c');
+      } else if (c.type === 'hub') {
+        setBadge(c.mesh, `${c.count}`, '#8a93a0');
+      }
+    }
   }
 
   // ---- ports (roost + landing pairs) -------------------------------------------
@@ -233,6 +317,11 @@ export class Board {
       if (c.type === 'filter') {
         items.push({ t: 'f', col, row, md: c.matchDir, dd: c.defaultDir, cfg: c.config });
       }
+      if (c.type === 'hub') items.push({ t: 'h', col, row });
+      if (c.type === 'switch') items.push({ t: 's', col, row, ttl: c.state.ttlMs });
+      if (c.type === 'meter') {
+        items.push({ t: 'm', col, row, dd: c.defaultDir, od: c.overflowDir, th: c.state.thresholdPps });
+      }
     }
     return JSON.stringify(items);
   }
@@ -250,6 +339,9 @@ export class Board {
       const items = JSON.parse(raw) as any[];
       for (const it of items) {
         if (it.t === 'b') this.setBelt(it.col, it.row, it.dir);
+        if (it.t === 'h') this.setHub(it.col, it.row);
+        if (it.t === 's') this.setSwitch(it.col, it.row, it.ttl);
+        if (it.t === 'm') this.setMeter(it.col, it.row, it.dd, it.od, it.th);
         if (it.t === 'f') {
           if (it.md !== undefined) {
             this.setFilter(it.col, it.row, it.md, it.dd, it.cfg);
@@ -332,12 +424,98 @@ function exitArrow(dir: number, mat: THREE.Material): THREE.Mesh {
   return arrow;
 }
 
+function makeHubMesh(): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, beltBaseMat));
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(0.28, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x4a5563, roughness: 0.5 }),
+  );
+  dome.position.y = 0.08;
+  g.add(dome);
+  for (let d = 0; d < 4; d++) {
+    g.add(exitArrow(d, new THREE.MeshStandardMaterial({ color: 0x8a93a0 })));
+  }
+  return g;
+}
+
+function makeSwitchMesh(): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, new THREE.MeshStandardMaterial({ color: 0x16323a, roughness: 0.8 })));
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 0.26, 0.6),
+    new THREE.MeshStandardMaterial({ color: 0x1d4e5c, roughness: 0.5 }),
+  );
+  box.position.y = 0.17;
+  g.add(box);
+  // blinkenlights
+  for (let i = 0; i < 4; i++) {
+    const led = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04, 6, 4),
+      new THREE.MeshStandardMaterial({ color: 0x53d8e8, emissive: 0x53d8e8, emissiveIntensity: 0.8 }),
+    );
+    led.position.set(-0.18 + i * 0.12, 0.31, 0.31);
+    g.add(led);
+  }
+  return g;
+}
+
+function makeMeterMesh(defaultDir: number, overflowDir: number): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, new THREE.MeshStandardMaterial({ color: 0x3a3324, roughness: 0.8 })));
+  const dial = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.24, 0.28, 0.3, 10),
+    new THREE.MeshStandardMaterial({ color: 0x5c4d1d, roughness: 0.5 }),
+  );
+  dial.position.y = 0.19;
+  g.add(dial);
+  g.add(exitArrow(defaultDir, new THREE.MeshStandardMaterial({ color: 0x6fdc8c })));
+  g.add(exitArrow(overflowDir, new THREE.MeshStandardMaterial({ color: 0xff6b6b })));
+  return g;
+}
+
+/** Small status badge above a machine; only re-renders when text changes. */
+function setBadge(mesh: THREE.Group, text: string, color: string): void {
+  if (mesh.userData.badgeText === text && mesh.userData.badgeColor === color) return;
+  mesh.userData.badgeText = text;
+  mesh.userData.badgeColor = color;
+  const old = mesh.userData.badge as THREE.Sprite | undefined;
+  if (old) mesh.remove(old);
+  const canvas = document.createElement('canvas');
+  canvas.width = 192;
+  canvas.height = 48;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(12,17,24,0.85)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = 'bold 26px Consolas, monospace';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.fillText(text, canvas.width / 2, 33);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
+  sprite.scale.set(0.95, 0.24, 1);
+  sprite.position.y = 0.55;
+  mesh.add(sprite);
+  mesh.userData.badge = sprite;
+}
+
 export function makeGhostBelt(): THREE.Group {
   return ghostify(makeBeltMesh(0));
 }
 
 export function makeGhostFilter(): THREE.Group {
   return ghostify(makeFilterMesh(1, 0));
+}
+
+export function makeGhostHub(): THREE.Group {
+  return ghostify(makeHubMesh());
+}
+
+export function makeGhostSwitch(): THREE.Group {
+  return ghostify(makeSwitchMesh());
+}
+
+export function makeGhostMeter(): THREE.Group {
+  return ghostify(makeMeterMesh(0, 1));
 }
 
 function ghostify(g: THREE.Group): THREE.Group {
