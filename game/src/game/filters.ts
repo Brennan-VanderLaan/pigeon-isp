@@ -73,38 +73,42 @@ export const KIND_OPTIONS = [
   'tcp', 'udp', 'other',
 ];
 
-/** Where does a frame physically exit a filter machine? Pure function — the
- *  single source of truth for filter routing, used by the simulation, the
- *  editor preview, and the tests. */
-export function filterExit(dir: number, side: 1 | -1, matchToSide: boolean, matched: boolean): number {
-  const ejected = matchToSide ? matched : !matched;
-  return ejected ? (dir + side + 4) % 4 : dir;
+export const DIR_NAMES = ['east', 'south', 'west', 'north'];
+export const DIR_ARROWS = ['→', '↓', '←', '↑'];
+
+/** Where does a frame physically exit a filter machine? Pure and absolute:
+ *  every filter has TWO independent compass exits — one for matching
+ *  traffic, one DEFAULT for everything else. The single source of truth
+ *  for filter routing, used by the simulation, the editor preview, and the
+ *  tests. */
+export function filterExit(matchDir: number, defaultDir: number, matched: boolean): number {
+  return matched ? matchDir : defaultDir;
 }
 
-export const DIR_NAMES = ['east', 'south', 'west', 'north'];
+/** Convert the v1 model (facing + eject side + match-goes-where) into the
+ *  two-exit model, for floors saved before defaults were configurable. */
+export function legacyExits(dir: number, side: 1 | -1, matchToSide: boolean): { matchDir: number; defaultDir: number } {
+  const sideDir = (dir + side + 4) % 4;
+  return matchToSide
+    ? { matchDir: sideDir, defaultDir: dir }
+    : { matchDir: dir, defaultDir: sideDir };
+}
 
 /** Human sentence stating BOTH physical paths with absolute compass
- *  directions — no more guessing which way anything goes. A filter's
- *  "straight" is ITS OWN facing, not the belt's flow; saying "east" out
- *  loud is what catches a machine placed sideways. */
-export function routingSummary(cfg: FilterConfig, matchToSide: boolean, side: 1 | -1, dir?: number): string {
+ *  directions — no more guessing which way anything goes. */
+export function routingSummary(cfg: FilterConfig, matchDir: number, defaultDir: number): string {
   const what =
     cfg.field === 'broadcast' ? 'broadcast' :
     cfg.field === 'custom' ? 'expr=true' :
     `${cfg.field}~“${cfg.value}”`;
-  const sideName = side === 1 ? 'right' : 'left';
-  const straightAbs = dir !== undefined ? ` (${DIR_NAMES[dir]})` : '';
-  const sideAbs = dir !== undefined ? ` (${DIR_NAMES[(dir + side + 4) % 4]})` : '';
-  return matchToSide
-    ? `${what} → eject ${sideName}${sideAbs} · everything else → straight${straightAbs}`
-    : `${what} → straight${straightAbs} · everything else → eject ${sideName}${sideAbs}`;
+  return `${what} → ${DIR_NAMES[matchDir]} ${DIR_ARROWS[matchDir]} · everything else → ${DIR_NAMES[defaultDir]} ${DIR_ARROWS[defaultDir]}`;
 }
 
 /** Per-filter runtime telemetry: what did this machine actually decide? */
 export interface FilterStats {
   hits: number;
   misses: number;
-  recent: ({ summary: string; matched: boolean; ejected: boolean } | undefined)[];
+  recent: ({ summary: string; matched: boolean; exit: number } | undefined)[];
   ptr: number;
 }
 

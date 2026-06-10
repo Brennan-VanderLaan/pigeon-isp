@@ -1,7 +1,7 @@
 // DOM HUD: status bar, packet inspector, pod console, toolbar, filter
 // programming panel, speed control.
 import {
-  DIR_NAMES, FILTER_FIELDS, KIND_OPTIONS, fieldByteRanges, routingSummary, sampleFrame,
+  DIR_ARROWS, DIR_NAMES, FILTER_FIELDS, KIND_OPTIONS, fieldByteRanges, routingSummary, sampleFrame,
   type FilterConfig, type FilterStats,
 } from '../game/filters';
 import { hexDump, type Decoded } from '../net/decode';
@@ -11,9 +11,8 @@ export type Tool = 'select' | 'belt' | 'filter' | 'erase';
 
 export interface FilterPanelState {
   config: FilterConfig;
-  matchToSide: boolean;
-  side: 1 | -1;
-  dir: number;
+  matchDir: number;
+  defaultDir: number;
   error?: string;
 }
 
@@ -162,20 +161,14 @@ export class Hud {
             <div class="hint2" id="fc-hint"></div>
           </div>
           <div class="row">
-            <label style="margin:0">matching frames go</label>
-            <select id="fc-dest" style="width:auto">
-              <option value="side">out the side</option>
-              <option value="straight">straight ahead</option>
+            <label style="margin:0">matching traffic exits</label>
+            <select id="fc-matchdir" style="width:auto">
+              ${DIR_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('')}
             </select>
           </div>
           <div class="row">
-            <label style="margin:0">eject side</label>
-            <select id="fc-side" style="width:auto">
-              <option value="1">right</option>
-              <option value="-1">left</option>
-            </select>
-            <label style="margin:0">facing</label>
-            <select id="fc-dir" style="width:auto">
+            <label style="margin:0">default exit (everything else)</label>
+            <select id="fc-defaultdir" style="width:auto">
               ${DIR_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('')}
             </select>
           </div>
@@ -201,9 +194,8 @@ export class Hud {
     const valInput = q<HTMLInputElement>('#fc-value');
     const exprInput = q<HTMLTextAreaElement>('#fc-expr');
     const hint = q<HTMLElement>('#fc-hint');
-    const destSel = q<HTMLSelectElement>('#fc-dest');
-    const sideSel = q<HTMLSelectElement>('#fc-side');
-    const dirSel = q<HTMLSelectElement>('#fc-dir');
+    const matchDirSel = q<HTMLSelectElement>('#fc-matchdir');
+    const defaultDirSel = q<HTMLSelectElement>('#fc-defaultdir');
     const errEl = q<HTMLElement>('#fc-err');
 
     const currentValue = (): string =>
@@ -229,9 +221,8 @@ export class Hud {
     const renderRoute = () => {
       q('#fc-route').textContent = '⮕ ' + routingSummary(
         { field: fieldSel.value as FilterConfig['field'], value: currentValue() },
-        destSel.value === 'side',
-        Number(sideSel.value) as 1 | -1,
-        Number(dirSel.value),
+        Number(matchDirSel.value),
+        Number(defaultDirSel.value),
       );
     };
 
@@ -244,10 +235,10 @@ export class Hud {
       for (let i = 1; i <= stats.recent.length; i++) {
         const r = stats.recent[(stats.ptr - i + stats.recent.length * 1000) % stats.recent.length];
         if (!r) continue;
-        // Two facts, never conflated: did the rule match, and where did the
-        // pigeon PHYSICALLY go.
+        // Two facts, never conflated: did the rule match, and which compass
+        // direction the pigeon PHYSICALLY left by.
         items.push(
-          `<div class="${r.matched ? 'v-hit' : 'v-miss'}">${r.matched ? '✓ match' : '· no-match'} ${r.ejected ? '◤ SIDE' : '→ straight'}  ${esc(r.summary)}</div>`,
+          `<div class="${r.matched ? 'v-hit' : 'v-miss'}">${r.matched ? '✓ match' : '· no-match'} ${DIR_ARROWS[r.exit]} ${DIR_NAMES[r.exit]}  ${esc(r.summary)}</div>`,
         );
       }
       q('#fc-verdicts').innerHTML = items.join('') || '<div class="hint2">no frames yet — send some traffic through</div>';
@@ -266,14 +257,12 @@ export class Hud {
     kindSel.addEventListener('change', () => { renderHex(); renderRoute(); });
     valInput.addEventListener('input', () => { renderHex(); renderRoute(); });
     exprInput.addEventListener('input', () => { renderHex(); renderRoute(); });
-    destSel.addEventListener('change', renderRoute);
-    sideSel.addEventListener('change', renderRoute);
-    dirSel.addEventListener('change', renderRoute);
+    matchDirSel.addEventListener('change', renderRoute);
+    defaultDirSel.addEventListener('change', renderRoute);
     valInput.value = state.config.field === 'custom' || state.config.field === 'kind' ? '' : state.config.value;
     exprInput.value = state.config.field === 'custom' ? state.config.value : "f.kind.includes('arp')";
-    destSel.value = state.matchToSide ? 'side' : 'straight';
-    sideSel.value = String(state.side);
-    dirSel.value = String(state.dir);
+    matchDirSel.value = String(state.matchDir);
+    defaultDirSel.value = String(state.defaultDir);
     errEl.textContent = state.error ?? '';
     syncMode();
     renderRoute();
@@ -283,9 +272,8 @@ export class Hud {
       const field = fieldSel.value as FilterConfig['field'];
       const err = onApply({
         config: { field, value: currentValue() },
-        matchToSide: destSel.value === 'side',
-        side: Number(sideSel.value) as 1 | -1,
-        dir: Number(dirSel.value),
+        matchDir: Number(matchDirSel.value),
+        defaultDir: Number(defaultDirSel.value),
       });
       errEl.textContent = err ?? '✓ programmed';
       renderHex();

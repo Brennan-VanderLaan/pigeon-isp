@@ -115,17 +115,14 @@ export class Pigeon {
         return cell.dir;
       case 'filter': {
         const matched = cell.compiled.match(this.decoded);
-        const exit = filterExit(cell.dir, cell.side, cell.matchToSide, matched);
+        const exit = filterExit(cell.matchDir, cell.defaultDir, matched);
         // Score the machine: the editor shows live verdicts (ring buffer,
-        // cheap enough to run at 5000x). `ejected` records the PHYSICAL
-        // exit, not the match result — displays must never lie about
-        // geometry.
+        // cheap enough to run at 5000x). `exit` records the PHYSICAL
+        // direction — displays must never lie about geometry.
         const st = cell.stats;
         if (matched) st.hits++;
         else st.misses++;
-        st.recent[st.ptr % st.recent.length] = {
-          summary: this.decoded.summary, matched, ejected: exit !== cell.dir,
-        };
+        st.recent[st.ptr % st.recent.length] = { summary: this.decoded.summary, matched, exit };
         st.ptr++;
         cell.lastFrame = this.token.snapshot;
         return exit;

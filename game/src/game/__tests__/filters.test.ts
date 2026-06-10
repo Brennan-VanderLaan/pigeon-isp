@@ -2,7 +2,7 @@
 // matched the wrong thing" lands here as a regression test.
 import { describe, expect, it } from 'vitest';
 import { decodeFrame } from '../../net/decode';
-import { compileFilter, fieldByteRanges, filterExit, sampleFrame } from '../filters';
+import { compileFilter, fieldByteRanges, filterExit, legacyExits, sampleFrame } from '../filters';
 import { ALICE_IP, ALICE_MAC, BOB_IP, FRAMES } from './frames';
 
 const decode = (raw: Uint8Array) => decodeFrame(raw.slice(0, 128), raw.length);
@@ -92,27 +92,25 @@ describe('field matchers', () => {
 });
 
 describe('filterExit — the geometry truth table', () => {
-  // dir 0=east 1=south 2=west 3=north; side 1=right -1=left
-  it('matchToSide: matching frames eject, others go straight', () => {
-    expect(filterExit(0, 1, true, true)).toBe(1); // east, eject right -> south
-    expect(filterExit(0, 1, true, false)).toBe(0); // unmatched -> straight east
-    expect(filterExit(0, -1, true, true)).toBe(3); // eject left -> north
-  });
-
-  it('match-to-straight INVERTS the side semantics (the screenshot bug)', () => {
-    // "matching frames go straight ahead": unmatched traffic ejects. An
-    // is-broadcast filter in this mode throws every UNICAST frame sideways
-    // — correct, surprising, and now documented.
-    expect(filterExit(0, 1, false, true)).toBe(0); // broadcast -> straight
-    expect(filterExit(0, 1, false, false)).toBe(1); // unicast -> ejected right
-  });
-
-  it('rotates with the machine facing', () => {
-    for (let dir = 0; dir < 4; dir++) {
-      expect(filterExit(dir, 1, true, false)).toBe(dir);
-      expect(filterExit(dir, 1, true, true)).toBe((dir + 1) % 4);
-      expect(filterExit(dir, -1, true, true)).toBe((dir + 3) % 4);
+  // dirs: 0=east 1=south 2=west 3=north. Two independent exits; the
+  // DEFAULT (where everything else goes) is fully configurable.
+  it('matched frames take the match exit, everything else the default', () => {
+    for (let matchDir = 0; matchDir < 4; matchDir++) {
+      for (let defaultDir = 0; defaultDir < 4; defaultDir++) {
+        expect(filterExit(matchDir, defaultDir, true)).toBe(matchDir);
+        expect(filterExit(matchDir, defaultDir, false)).toBe(defaultDir);
+      }
     }
+  });
+
+  it('converts v1 floors (facing + side + match-goes-where) faithfully', () => {
+    // east-facing, eject right, matching ejects: match->south, default->east
+    expect(legacyExits(0, 1, true)).toEqual({ matchDir: 1, defaultDir: 0 });
+    // east-facing, eject right, matching goes straight (the screenshot
+    // config): match->east, everything else thrown south
+    expect(legacyExits(0, 1, false)).toEqual({ matchDir: 0, defaultDir: 1 });
+    // north-facing, eject left -> west
+    expect(legacyExits(3, -1, true)).toEqual({ matchDir: 2, defaultDir: 3 });
   });
 });
 

@@ -8,7 +8,10 @@
 // The floor persists to localStorage — your router survives a refresh.
 import * as THREE from 'three';
 import type { PortInfo } from '../types';
-import { compileFilter, describeFilter, newFilterStats, type CompiledFilter, type FilterConfig, type FilterStats } from './filters';
+import {
+  DIR_ARROWS, compileFilter, describeFilter, legacyExits, newFilterStats,
+  type CompiledFilter, type FilterConfig, type FilterStats,
+} from './filters';
 
 export const COLS = 24;
 export const ROWS = 14;
@@ -25,7 +28,7 @@ export const DIRS = [
 export type Cell =
   | { type: 'belt'; dir: number; mesh: THREE.Group }
   | {
-      type: 'filter'; dir: number; side: 1 | -1; matchToSide: boolean;
+      type: 'filter'; matchDir: number; defaultDir: number;
       config: FilterConfig; compiled: CompiledFilter; mesh: THREE.Group;
       stats: FilterStats; lastFrame?: Uint8Array;
     }
@@ -113,39 +116,37 @@ export class Board {
     this.onChange();
   }
 
-  setFilter(col: number, row: number, dir: number, side: 1 | -1, config?: FilterConfig, matchToSide = true): void {
+  setFilter(col: number, row: number, matchDir: number, defaultDir: number, config?: FilterConfig): void {
     if (!this.clearForBuild(col, row)) return;
     this.removeMachine(col, row);
     const cfg = config ?? { field: 'kind', value: 'arp' };
-    const mesh = makeFilterMesh(dir, side);
+    const mesh = makeFilterMesh(matchDir, defaultDir);
     mesh.position.copy(this.cellToWorld(col, row, 0.04));
     mesh.userData.boardCell = { col, row };
-    attachRuleLabel(mesh, cfg, matchToSide);
+    attachRuleLabel(mesh, cfg, matchDir, defaultDir);
     this.group.add(mesh);
     this.cells.set(key(col, row), {
-      type: 'filter', dir, side, matchToSide, config: cfg, compiled: compileFilter(cfg), mesh,
+      type: 'filter', matchDir, defaultDir, config: cfg, compiled: compileFilter(cfg), mesh,
       stats: newFilterStats(),
     });
     this.onChange();
   }
 
   /** Update a filter's config in place (from the config panel). */
-  configureFilter(col: number, row: number, config: FilterConfig, matchToSide: boolean, side: 1 | -1, dir?: number): string | undefined {
+  configureFilter(col: number, row: number, config: FilterConfig, matchDir: number, defaultDir: number): string | undefined {
     const c = this.cells.get(key(col, row));
     if (c?.type !== 'filter') return;
     c.config = config;
-    c.matchToSide = matchToSide;
-    const newDir = dir ?? c.dir;
-    if (c.side !== side || c.dir !== newDir) {
-      c.side = side;
-      c.dir = newDir;
+    if (c.matchDir !== matchDir || c.defaultDir !== defaultDir) {
+      c.matchDir = matchDir;
+      c.defaultDir = defaultDir;
       this.group.remove(c.mesh);
-      c.mesh = makeFilterMesh(newDir, side);
+      c.mesh = makeFilterMesh(matchDir, defaultDir);
       c.mesh.position.copy(this.cellToWorld(col, row, 0.04));
       c.mesh.userData.boardCell = { col, row };
       this.group.add(c.mesh);
     }
-    attachRuleLabel(c.mesh, config, matchToSide);
+    attachRuleLabel(c.mesh, config, matchDir, defaultDir);
     c.compiled = compileFilter(config);
     c.stats = newFilterStats(); // new rule, fresh score
     this.onChange();
@@ -230,7 +231,7 @@ export class Board {
       const [col, row] = k.split(',').map(Number);
       if (c.type === 'belt') items.push({ t: 'b', col, row, dir: c.dir });
       if (c.type === 'filter') {
-        items.push({ t: 'f', col, row, dir: c.dir, side: c.side, m: c.matchToSide, cfg: c.config });
+        items.push({ t: 'f', col, row, md: c.matchDir, dd: c.defaultDir, cfg: c.config });
       }
     }
     return JSON.stringify(items);
@@ -249,7 +250,15 @@ export class Board {
       const items = JSON.parse(raw) as any[];
       for (const it of items) {
         if (it.t === 'b') this.setBelt(it.col, it.row, it.dir);
-        if (it.t === 'f') this.setFilter(it.col, it.row, it.dir, it.side, it.cfg, it.m);
+        if (it.t === 'f') {
+          if (it.md !== undefined) {
+            this.setFilter(it.col, it.row, it.md, it.dd, it.cfg);
+          } else {
+            // v1 floor: facing + side + match-goes-where → two exits.
+            const { matchDir, defaultDir } = legacyExits(it.dir, it.side, it.m);
+            this.setFilter(it.col, it.row, matchDir, defaultDir, it.cfg);
+          }
+        }
       }
       return items.length;
     } catch {
@@ -288,7 +297,10 @@ function makeBeltMesh(dir: number): THREE.Group {
   return g;
 }
 
-function makeFilterMesh(dir: number, side: 1 | -1): THREE.Group {
+/** Filter mesh: housing + TWO absolute compass arrows. Purple = matching
+ *  traffic's exit, gray = the default exit. The mesh itself is never
+ *  rotated — the arrows point where the frames will actually go. */
+function makeFilterMesh(matchDir: number, defaultDir: number): THREE.Group {
   const g = new THREE.Group();
   g.add(new THREE.Mesh(beltBase, filterBaseMat));
   const housing = new THREE.Mesh(
@@ -304,19 +316,20 @@ function makeFilterMesh(dir: number, side: 1 | -1): THREE.Group {
   eye.position.y = 0.4;
   g.add(eye);
 
-  // Straight-through arrow (gray) and eject arrow (purple).
-  const fwd = new THREE.Mesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x8a93a0 }));
-  fwd.position.set(0, 0.09, 0.38);
-  fwd.rotation.x = Math.PI / 2;
-  g.add(fwd);
-  const eject = new THREE.Mesh(arrowGeo, sideArrowMat);
-  eject.position.set(-0.38 * side, 0.09, 0); // local x maps to world per orient(); sign tuned with rotation below
-  eject.rotation.z = (Math.PI / 2) * side;
-  eject.rotation.x = Math.PI / 2;
-  g.add(eject);
-
-  orient(g, dir);
+  g.add(exitArrow(defaultDir, new THREE.MeshStandardMaterial({ color: 0x8a93a0 })));
+  g.add(exitArrow(matchDir, sideArrowMat));
   return g;
+}
+
+/** An arrow lying flat, pointing out of the cell along a compass dir. */
+function exitArrow(dir: number, mat: THREE.Material): THREE.Mesh {
+  const d = DIRS[dir];
+  const arrow = new THREE.Mesh(arrowGeo, mat);
+  arrow.position.set(d.dx * 0.38, 0.09, d.dz * 0.38);
+  // Cone points +y; lay it flat toward (dx,dz).
+  arrow.rotation.x = Math.PI / 2;
+  arrow.rotation.z = -Math.atan2(d.dx, d.dz);
+  return arrow;
 }
 
 export function makeGhostBelt(): THREE.Group {
@@ -324,7 +337,7 @@ export function makeGhostBelt(): THREE.Group {
 }
 
 export function makeGhostFilter(): THREE.Group {
-  return ghostify(makeFilterMesh(0, 1));
+  return ghostify(makeFilterMesh(1, 0));
 }
 
 function ghostify(g: THREE.Group): THREE.Group {
@@ -345,7 +358,7 @@ export function orientGhost(g: THREE.Group, dir: number): void {
 
 // Every filter wears its rule on the floor — an unprogrammed default in a
 // chain should be impossible to miss.
-function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig, matchToSide = true): void {
+function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig, matchDir: number, defaultDir: number): void {
   const old = mesh.userData.ruleLabel as THREE.Sprite | undefined;
   if (old) mesh.remove(old);
   const canvas = document.createElement('canvas');
@@ -358,8 +371,12 @@ function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig, matchToSide = tru
   ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
   ctx.font = '30px Consolas, monospace';
   ctx.fillStyle = '#b98aff';
-  // ⤴ = matching frames eject; ⬆ = matching frames go straight.
-  ctx.fillText(`${matchToSide ? '⤴' : '⬆'} ${describeFilter(cfg)}`.slice(0, 24), 12, 42);
+  // match exit arrow first (purple rule), then where everything else goes.
+  ctx.fillText(`${DIR_ARROWS[matchDir]} ${describeFilter(cfg)}`.slice(0, 20), 12, 42);
+  ctx.fillStyle = '#8a93a0';
+  ctx.textAlign = 'right';
+  ctx.fillText(`else${DIR_ARROWS[defaultDir]}`, canvas.width - 10, 42);
+  ctx.textAlign = 'left';
   const tex = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
   sprite.scale.set(1.7, 0.28, 1);

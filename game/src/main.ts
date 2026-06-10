@@ -210,8 +210,8 @@ function openFilterEditor(col: number, row: number): void {
   const cell = board.cellAt(col, row);
   if (cell?.type !== 'filter') return;
   hud.openFilterPanel(
-    { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, dir: cell.dir, error: cell.compiled.error },
-    (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side, s.dir),
+    { config: cell.config, matchDir: cell.matchDir, defaultDir: cell.defaultDir, error: cell.compiled.error },
+    (s) => board.configureFilter(col, row, s.config, s.matchDir, s.defaultDir),
     () => {
       const c = board.cellAt(col, row);
       return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
@@ -279,7 +279,10 @@ window.addEventListener('pointerdown', (e) => {
     const hit = world.pickGround();
     const cell = hit ? board.worldToCell(hit) : null;
     if (cell) {
-      board.setFilter(cell.col, cell.row, buildDir, ejectSide);
+      // default exit = build direction; match exit starts beside it (E flips
+      // which side) — both editable in the panel that opens right away.
+      const matchDir = (buildDir + ejectSide + 4) % 4;
+      board.setFilter(cell.col, cell.row, matchDir, buildDir);
       openFilterEditor(cell.col, cell.row);
     }
     return;
