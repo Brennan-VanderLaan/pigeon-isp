@@ -298,43 +298,60 @@ export class Hud {
 
   // ---- machine inspectors (switch CAM table, meter, hub) -----------------------
 
-  /** Live CAM table view — the switch's brain, visible. */
-  openSwitchPanel(live: () => { rows: { mac: string; dir: number; ageS: number; hits: number }[]; floods: number; forwards: number; ttlMs: number } | null): void {
+  /** Live FDB view — the multi-port switch's brain, visible. IEEE 802.1D. */
+  openSwitchPanel(
+    _applianceId: number,
+    live: () => { ports: number; rows: { mac: string; port: number; ageS: number; hits: number }[]; floods: number; forwards: number; filters: number; ttlMs: number } | null,
+  ): void {
     this.closeFilterPanel();
     this.filterPanel.style.display = 'block';
     const render = () => {
       const lv = live();
-      if (!lv) return;
+      if (!lv) { this.closeFilterPanel(); return; }
       const rows = lv.rows
-        .map((r) => `<tr><td>${esc(r.mac)}</td><td>${DIR_ARROWS[r.dir]} ${DIR_NAMES[r.dir]}</td><td>${r.ageS}s</td><td>${r.hits}</td></tr>`)
+        .map((r) => `<tr><td>${esc(r.mac)}</td><td>P${r.port}</td><td>${r.ageS}s</td><td>${r.hits}</td></tr>`)
         .join('');
       this.filterPanel.innerHTML = `
-        <h3>⇄ switch — CAM table</h3>
-        <div class="hint2">learns src MAC → entry side · forwards known dst · floods unknown/broadcast · TTL ${lv.ttlMs / 1000}s</div>
-        <table class="grid"><tr><th>mac</th><th>exit</th><th>age</th><th>hits</th></tr>${rows || ''}</table>
+        <h3>⇄ switch — ${lv.ports} port(s)</h3>
+        <div class="hint2">IEEE 802.1D transparent bridge. Learns src MAC → ingress port (§7.8),
+        forwards known unicast, floods unknown/broadcast out all other ports (§7.7), ages out at ${lv.ttlMs / 1000}s (§7.9).
+        ARP discovery (RFC 826) relies on that flood.</div>
+        <div class="route" style="margin-top:8px">↪ click the switch's edge cells on the floor to add / remove numbered ports</div>
+        <label style="margin-top:10px">filtering database (CAM)</label>
+        <table class="grid"><tr><th>mac</th><th>port</th><th>age</th><th>hits</th></tr>${rows}</table>
         ${rows ? '' : '<div class="hint2">empty — no frames learned yet</div>'}
-        <div class="hint2" style="margin-top:8px">forwards ${lv.forwards} · floods ${lv.floods}</div>
+        <div class="hint2" style="margin-top:8px">forwards ${lv.forwards} · floods ${lv.floods} · filtered ${lv.filters}</div>
         <div class="row"><button id="fc-close">Close</button></div>`;
       this.filterPanel.querySelector('#fc-close')!.addEventListener('click', () => this.closeFilterPanel());
     };
     render();
-    this.filterTimer = window.setInterval(render, 800);
+    this.filterTimer = window.setInterval(render, 700);
   }
 
   openMeterPanel(
-    state: { thresholdPps: number; defaultDir: number; overflowDir: number },
-    onApply: (thresholdPps: number, defaultDir: number, overflowDir: number) => void,
-    live: () => { rate: number; total: number; overTotal: number } | null,
+    state: { limit: number; mode: 'pps' | 'bps'; defaultDir: number; overflowDir: number },
+    onApply: (limit: number, mode: 'pps' | 'bps', defaultDir: number, overflowDir: number) => void,
+    live: () => { rate: number; total: number; diverted: number; mode: 'pps' | 'bps' } | null,
   ): void {
     this.closeFilterPanel();
     this.filterPanel.style.display = 'block';
     const dirOpts = (sel: number) => DIR_NAMES.map((n, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${n}</option>`).join('');
+    // bps mode shows a unit picker; the stored limit is always bytes/sec.
+    const asUnit = state.mode === 'bps' ? bytesToUnit(state.limit) : { val: state.limit, unit: 'pps' };
     this.filterPanel.innerHTML = `
-      <h3>◔ meter — rate limiter</h3>
-      <div class="hint2">frames within the rate take the normal exit; over-threshold traffic takes the overflow exit</div>
+      <h3>◔ meter — token-bucket rate limiter</h3>
+      <div class="hint2">passes UP TO the limit (allowed traffic flows on the normal exit); the EXCESS spills to
+      the overflow exit. Token bucket, burst = 1s. Limit by packets/sec or by bandwidth.</div>
       <div class="row">
-        <label style="margin:0">threshold</label>
-        <input type="number" id="mt-th" value="${state.thresholdPps}" min="1" style="width:90px"> pps
+        <label style="margin:0">limit</label>
+        <input type="number" id="mt-val" value="${asUnit.val}" min="1" style="width:90px">
+        <select id="mt-unit" style="width:auto">
+          <option value="pps" ${state.mode === 'pps' ? 'selected' : ''}>pps</option>
+          <option value="kbps" ${asUnit.unit === 'kbps' ? 'selected' : ''}>kbps</option>
+          <option value="mbps" ${asUnit.unit === 'mbps' ? 'selected' : ''}>mbps</option>
+          <option value="gbps" ${asUnit.unit === 'gbps' ? 'selected' : ''}>gbps</option>
+          <option value="bps" ${asUnit.unit === 'bps' ? 'selected' : ''}>bps</option>
+        </select>
       </div>
       <div class="row">
         <label style="margin:0">normal exit</label><select id="mt-dd" style="width:auto">${dirOpts(state.defaultDir)}</select>
@@ -344,17 +361,19 @@ export class Hud {
       <div class="hint2" id="mt-live" style="margin-top:8px"></div>`;
     const q = <T extends HTMLElement>(s: string) => this.filterPanel.querySelector<T>(s)!;
     q('#mt-apply').addEventListener('click', () => {
-      onApply(
-        Math.max(1, Number(q<HTMLInputElement>('#mt-th').value)),
-        Number(q<HTMLSelectElement>('#mt-dd').value),
-        Number(q<HTMLSelectElement>('#mt-od').value),
-      );
+      const unit = q<HTMLSelectElement>('#mt-unit').value;
+      const val = Math.max(1, Number(q<HTMLInputElement>('#mt-val').value));
+      const mode: 'pps' | 'bps' = unit === 'pps' ? 'pps' : 'bps';
+      const limit = unit === 'pps' ? val : unitToBytes(val, unit);
+      onApply(limit, mode, Number(q<HTMLSelectElement>('#mt-dd').value), Number(q<HTMLSelectElement>('#mt-od').value));
       q('#mt-ok').textContent = '✓ set';
     });
     q('#fc-close').addEventListener('click', () => this.closeFilterPanel());
     const renderLive = () => {
       const lv = live();
-      if (lv) q('#mt-live').textContent = `rate ${lv.rate} pps · total ${lv.total} · over-rate ${lv.overTotal}`;
+      if (!lv) return;
+      const r = lv.mode === 'pps' ? `${lv.rate} pps` : bytesRate(lv.rate);
+      q('#mt-live').textContent = `passing ${r} · total ${lv.total} · diverted ${lv.diverted}`;
     };
     renderLive();
     this.filterTimer = window.setInterval(renderLive, 600);
@@ -374,6 +393,26 @@ export class Hud {
     render();
     this.filterTimer = window.setInterval(render, 1000);
   }
+}
+
+// Meter limits are stored as BYTES/sec; the UI works in bit-rate units.
+function unitToBytes(val: number, unit: string): number {
+  const bits = unit === 'gbps' ? val * 1e9 : unit === 'mbps' ? val * 1e6 : unit === 'kbps' ? val * 1e3 : val;
+  return Math.max(1, Math.round(bits / 8));
+}
+function bytesToUnit(bytes: number): { val: number; unit: string } {
+  const bits = bytes * 8;
+  if (bits >= 1e9) return { val: +(bits / 1e9).toFixed(2), unit: 'gbps' };
+  if (bits >= 1e6) return { val: +(bits / 1e6).toFixed(2), unit: 'mbps' };
+  if (bits >= 1e3) return { val: +(bits / 1e3).toFixed(2), unit: 'kbps' };
+  return { val: bits, unit: 'bps' };
+}
+function bytesRate(bytesPerSec: number): string {
+  const bits = bytesPerSec * 8;
+  if (bits >= 1e9) return `${(bits / 1e9).toFixed(2)} Gbps`;
+  if (bits >= 1e6) return `${(bits / 1e6).toFixed(2)} Mbps`;
+  if (bits >= 1e3) return `${(bits / 1e3).toFixed(1)} kbps`;
+  return `${bits} bps`;
 }
 
 /** Hex grid with inspected-byte highlighting. */

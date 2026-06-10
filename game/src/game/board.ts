@@ -12,7 +12,12 @@ import {
   DIR_ARROWS, compileFilter, describeFilter, legacyExits, newFilterStats,
   type CompiledFilter, type FilterConfig, type FilterStats,
 } from './filters';
-import { newMeterState, newSwitchState, type MeterState, type SwitchState } from './machines';
+import {
+  meterLabel, newMeterState, newSwitchState, switchStep,
+  type MeterMode, type MeterState, type SwitchState,
+} from './machines';
+import type { Decoded } from '../net/decode';
+import type { Emission } from './pigeons';
 
 export const COLS = 28;
 export const ROWS = 16;
@@ -34,10 +39,30 @@ export type Cell =
       stats: FilterStats; lastFrame?: Uint8Array;
     }
   | { type: 'hub'; count: number; mesh: THREE.Group }
-  | { type: 'switch'; state: SwitchState; mesh: THREE.Group }
   | { type: 'meter'; state: MeterState; defaultDir: number; overflowDir: number; mesh: THREE.Group }
+  // Multi-cell appliance: a body cell (solid) or a numbered port cell.
+  | { type: 'appliance-body'; applianceId: number }
+  | { type: 'appliance-port'; applianceId: number; portIndex: number; dir: number }
   | { type: 'roost'; port: PortInfo; facing: number; mesh: THREE.Group }
   | { type: 'landing'; port: PortInfo; mesh: THREE.Group };
+
+/** A multi-cell switch (or future router). Frames enter at a port, the FDB
+ *  decides, they leave at exit port(s). IEEE 802.1D. */
+export interface Appliance {
+  id: number;
+  kind: 'switch';
+  cells: Set<string>; // body + port cells, "col,row"
+  ports: AppliancePort[]; // numbered in placement order
+  state: SwitchState;
+  group: THREE.Group;
+}
+
+export interface AppliancePort {
+  col: number;
+  row: number;
+  dir: number; // outward compass direction (the edge it sits on)
+  index: number;
+}
 
 export interface PortLoc {
   roost: { col: number; row: number };
@@ -78,6 +103,8 @@ export class Board {
   cells = new Map<string, Cell>();
   private portLocs = new Map<number, PortLoc>();
   private usedSlots = new Set<number>();
+  private appliances = new Map<number, Appliance>();
+  private nextApplianceId = 1;
   readonly group = new THREE.Group();
   onChange: () => void = () => {};
 
@@ -174,18 +201,7 @@ export class Board {
     this.onChange();
   }
 
-  setSwitch(col: number, row: number, ttlMs = 30_000): void {
-    if (!this.clearForBuild(col, row)) return;
-    this.removeMachine(col, row);
-    const mesh = makeSwitchMesh();
-    mesh.position.copy(this.cellToWorld(col, row, 0.04));
-    mesh.userData.boardCell = { col, row };
-    this.group.add(mesh);
-    this.cells.set(key(col, row), { type: 'switch', state: newSwitchState(ttlMs), mesh });
-    this.onChange();
-  }
-
-  setMeter(col: number, row: number, defaultDir: number, overflowDir: number, thresholdPps = 100): void {
+  setMeter(col: number, row: number, defaultDir: number, overflowDir: number, limit = 100, mode: MeterMode = 'pps'): void {
     if (!this.clearForBuild(col, row)) return;
     this.removeMachine(col, row);
     const mesh = makeMeterMesh(defaultDir, overflowDir);
@@ -193,15 +209,19 @@ export class Board {
     mesh.userData.boardCell = { col, row };
     this.group.add(mesh);
     this.cells.set(key(col, row), {
-      type: 'meter', state: newMeterState(thresholdPps), defaultDir, overflowDir, mesh,
+      type: 'meter', state: newMeterState(limit, mode), defaultDir, overflowDir, mesh,
     });
     this.onChange();
   }
 
-  configureMeter(col: number, row: number, thresholdPps: number, defaultDir: number, overflowDir: number): void {
+  configureMeter(col: number, row: number, limit: number, mode: MeterMode, defaultDir: number, overflowDir: number): void {
     const c = this.cells.get(key(col, row));
     if (c?.type !== 'meter') return;
-    c.state.thresholdPps = thresholdPps;
+    c.state.limit = limit;
+    if (c.state.mode !== mode) {
+      c.state.mode = mode;
+      c.state.tokens = limit; // fresh bucket on a unit change
+    }
     if (c.defaultDir !== defaultDir || c.overflowDir !== overflowDir) {
       c.defaultDir = defaultDir;
       c.overflowDir = overflowDir;
@@ -214,17 +234,160 @@ export class Board {
     this.onChange();
   }
 
+  // ---- appliances (multi-cell switches) --------------------------------------
+
+  /** Lay a switch body over a rectangle. Cells already holding a host are
+   *  skipped; returns the new appliance id, or null if nothing was placed. */
+  createSwitch(c0: number, r0: number, c1: number, r1: number): number | null {
+    const minC = Math.max(0, Math.min(c0, c1));
+    const maxC = Math.min(COLS - 1, Math.max(c0, c1));
+    const minR = Math.max(0, Math.min(r0, r1));
+    const maxR = Math.min(ROWS - 1, Math.max(r0, r1));
+    const cells = new Set<string>();
+    for (let col = minC; col <= maxC; col++) {
+      for (let row = minR; row <= maxR; row++) {
+        const ex = this.cells.get(key(col, row));
+        if (ex && !Board.isMachine(ex.type)) continue; // don't pave a host
+        cells.add(key(col, row));
+      }
+    }
+    if (cells.size < 2) return null;
+
+    // Clear any machines under the footprint first.
+    for (const k of cells) {
+      const [col, row] = k.split(',').map(Number);
+      this.removeMachine(col, row);
+    }
+
+    const id = this.nextApplianceId++;
+    const group = new THREE.Group();
+    this.group.add(group);
+    const app: Appliance = { id, kind: 'switch', cells, ports: [], state: newSwitchState(), group };
+    this.appliances.set(id, app);
+    for (const k of cells) {
+      this.cells.set(k, { type: 'appliance-body', applianceId: id });
+    }
+    this.rebuildApplianceMesh(app);
+    this.onChange();
+    return id;
+  }
+
+  /** Toggle a perimeter cell of an appliance as a numbered port. */
+  togglePort(applianceId: number, col: number, row: number): void {
+    const app = this.appliances.get(applianceId);
+    if (!app || !app.cells.has(key(col, row))) return;
+    const dir = this.edgeDir(app, col, row);
+    if (dir < 0) return; // interior cell: can't be a port
+
+    const existing = app.ports.findIndex((p) => p.col === col && p.row === row);
+    if (existing >= 0) {
+      app.ports.splice(existing, 1);
+      app.ports.forEach((p, i) => (p.index = i)); // renumber
+      this.cells.set(key(col, row), { type: 'appliance-body', applianceId });
+    } else {
+      const port: AppliancePort = { col, row, dir, index: app.ports.length };
+      app.ports.push(port);
+      this.cells.set(key(col, row), { type: 'appliance-port', applianceId, portIndex: port.index, dir });
+    }
+    this.rebuildApplianceMesh(app);
+    this.onChange();
+  }
+
+  /** Which outward edge is (col,row) on? -1 if interior (not on the hull). */
+  private edgeDir(app: Appliance, col: number, row: number): number {
+    const has = (c: number, r: number) => app.cells.has(key(c, r));
+    // A cell is a port candidate on the edge where it has no body neighbor.
+    if (!has(col, row - 1)) return 3; // north open
+    if (!has(col + 1, row)) return 0; // east open
+    if (!has(col, row + 1)) return 1; // south open
+    if (!has(col - 1, row)) return 2; // west open
+    return -1;
+  }
+
+  applianceAt(col: number, row: number): Appliance | undefined {
+    const c = this.cells.get(key(col, row));
+    if (c?.type === 'appliance-body' || c?.type === 'appliance-port') return this.appliances.get(c.applianceId);
+    return undefined;
+  }
+
+  getAppliance(id: number): Appliance | undefined {
+    return this.appliances.get(id);
+  }
+
+  /** The pigeon-facing routing call: a frame entered port `ingress`, where
+   *  does it leave? Returns exit emissions, or 'filtered' to drop. */
+  routeAppliance(id: number, ingress: number, frame: Decoded, now: number): Emission[] | 'filtered' {
+    const app = this.appliances.get(id);
+    if (!app || app.ports.length === 0) return 'filtered';
+    const decision = switchStep(app.state, frame, ingress, app.ports.length, now);
+    if (decision.exits.length === 0) return 'filtered';
+    return decision.exits
+      .map((idx) => app.ports[idx])
+      .filter(Boolean)
+      .map((p) => ({ col: p.col, row: p.row, dir: p.dir }));
+  }
+
+  private removeAppliance(id: number): void {
+    const app = this.appliances.get(id);
+    if (!app) return;
+    this.group.remove(app.group);
+    for (const k of app.cells) this.cells.delete(k);
+    this.appliances.delete(id);
+  }
+
+  /** Rebuild an appliance's 3D body + port markers + label. */
+  private rebuildApplianceMesh(app: Appliance): void {
+    while (app.group.children.length) app.group.remove(app.group.children[0]);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1d4e5c, roughness: 0.5 });
+    const portMat = new THREE.MeshStandardMaterial({ color: 0x53d8e8, emissive: 0x53d8e8, emissiveIntensity: 0.7 });
+    const badgeKeep = app.group.userData.badge; // preserve badge sprite if any
+    for (const k of app.cells) {
+      const [col, row] = k.split(',').map(Number);
+      const isPort = this.cells.get(k)?.type === 'appliance-port';
+      const tile = new THREE.Mesh(
+        new THREE.BoxGeometry(CELL * 0.96, 0.22, CELL * 0.96),
+        isPort ? portMat : bodyMat,
+      );
+      tile.position.copy(this.cellToWorld(col, row, 0.11));
+      app.group.add(tile);
+    }
+    // Port number labels.
+    for (const p of app.ports) {
+      const lbl = makeTinyLabel(`P${p.index}`);
+      lbl.position.copy(this.cellToWorld(p.col, p.row, 0.34));
+      app.group.add(lbl);
+      // little outward arrow
+      const d = DIRS[p.dir];
+      const arrow = new THREE.Mesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x0b0e13 }));
+      arrow.position.copy(this.cellToWorld(p.col, p.row, 0.24));
+      arrow.position.x += d.dx * 0.3;
+      arrow.position.z += d.dz * 0.3;
+      arrow.rotation.x = Math.PI / 2;
+      arrow.rotation.z = -Math.atan2(d.dx, d.dz);
+      app.group.add(arrow);
+    }
+    if (badgeKeep) app.group.add(badgeKeep);
+    app.group.userData.boardCell = { col: app.ports[0]?.col ?? [...app.cells][0].split(',').map(Number)[0], row: 0 };
+    // userData for picking: any cell click maps back via cells map; store id.
+    app.group.userData.applianceId = app.id;
+  }
+
   eraseMachine(col: number, row: number): void {
     if (this.removeMachine(col, row)) this.onChange();
   }
 
   private static isMachine(t: string): boolean {
-    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'switch' || t === 'meter';
+    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'meter' ||
+      t === 'appliance-body' || t === 'appliance-port';
   }
 
   private removeMachine(col: number, row: number): boolean {
     const existing = this.cells.get(key(col, row));
     if (!existing || !Board.isMachine(existing.type)) return false;
+    if (existing.type === 'appliance-body' || existing.type === 'appliance-port') {
+      this.removeAppliance(existing.applianceId); // erasing any cell scraps the box
+      return true;
+    }
     this.group.remove(existing.mesh);
     this.cells.delete(key(col, row));
     return true;
@@ -239,8 +402,9 @@ export class Board {
   machineMeshes(): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
     for (const c of this.cells.values()) {
-      if (c.type === 'filter' || c.type === 'hub' || c.type === 'switch' || c.type === 'meter') out.push(c.mesh);
+      if (c.type === 'filter' || c.type === 'hub' || c.type === 'meter') out.push(c.mesh);
     }
+    for (const app of this.appliances.values()) out.push(app.group);
     return out;
   }
 
@@ -248,17 +412,17 @@ export class Board {
   updateBadges(): void {
     const now = performance.now();
     for (const c of this.cells.values()) {
-      if (c.type === 'switch') {
-        let live = 0;
-        for (const e of c.state.table.values()) {
-          if (now - e.learnedAt <= c.state.ttlMs) live++;
-        }
-        setBadge(c.mesh, `${live} macs`, '#53d8e8');
-      } else if (c.type === 'meter') {
-        setBadge(c.mesh, `${c.state.lastRate}/${c.state.thresholdPps} pps`, c.state.lastRate > c.state.thresholdPps ? '#ff6b6b' : '#6fdc8c');
+      if (c.type === 'meter') {
+        const lbl = c.state.mode === 'pps' ? `${c.state.rate}/${c.state.limit} pps` : `${meterLabel(c.state)}`;
+        setBadge(c.mesh, lbl, c.state.diverted > 0 ? '#ffb347' : '#6fdc8c');
       } else if (c.type === 'hub') {
         setBadge(c.mesh, `${c.count}`, '#8a93a0');
       }
+    }
+    for (const app of this.appliances.values()) {
+      let live = 0;
+      for (const e of app.state.fdb.values()) if (now - e.learnedAt <= app.state.ttlMs) live++;
+      setBadge(app.group, `${app.ports.length}p · ${live} macs`, '#53d8e8');
     }
   }
 
@@ -318,10 +482,13 @@ export class Board {
         items.push({ t: 'f', col, row, md: c.matchDir, dd: c.defaultDir, cfg: c.config });
       }
       if (c.type === 'hub') items.push({ t: 'h', col, row });
-      if (c.type === 'switch') items.push({ t: 's', col, row, ttl: c.state.ttlMs });
       if (c.type === 'meter') {
-        items.push({ t: 'm', col, row, dd: c.defaultDir, od: c.overflowDir, th: c.state.thresholdPps });
+        items.push({ t: 'm', col, row, dd: c.defaultDir, od: c.overflowDir, lim: c.state.limit, mode: c.state.mode });
       }
+    }
+    for (const app of this.appliances.values()) {
+      const cells = [...app.cells].map((k) => k.split(',').map(Number));
+      items.push({ t: 'A', cells, ports: app.ports.map((p) => [p.col, p.row]), ttl: app.state.ttlMs });
     }
     return JSON.stringify(items);
   }
@@ -340,8 +507,15 @@ export class Board {
       for (const it of items) {
         if (it.t === 'b') this.setBelt(it.col, it.row, it.dir);
         if (it.t === 'h') this.setHub(it.col, it.row);
-        if (it.t === 's') this.setSwitch(it.col, it.row, it.ttl);
-        if (it.t === 'm') this.setMeter(it.col, it.row, it.dd, it.od, it.th);
+        // 's' (legacy 1x1 switch) is intentionally dropped — superseded by
+        // multi-port appliances.
+        if (it.t === 'm') this.setMeter(it.col, it.row, it.dd, it.od, it.lim ?? it.th ?? 100, it.mode ?? 'pps');
+        if (it.t === 'A') {
+          const cols = it.cells.map((c: number[]) => c[0]);
+          const rows = it.cells.map((c: number[]) => c[1]);
+          const id = this.createSwitch(Math.min(...cols), Math.min(...rows), Math.max(...cols), Math.max(...rows));
+          if (id !== null) for (const [pc, pr] of it.ports) this.togglePort(id, pc, pr);
+        }
         if (it.t === 'f') {
           if (it.md !== undefined) {
             this.setFilter(it.col, it.row, it.md, it.dd, it.cfg);
@@ -439,26 +613,6 @@ function makeHubMesh(): THREE.Group {
   return g;
 }
 
-function makeSwitchMesh(): THREE.Group {
-  const g = new THREE.Group();
-  g.add(new THREE.Mesh(beltBase, new THREE.MeshStandardMaterial({ color: 0x16323a, roughness: 0.8 })));
-  const box = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.26, 0.6),
-    new THREE.MeshStandardMaterial({ color: 0x1d4e5c, roughness: 0.5 }),
-  );
-  box.position.y = 0.17;
-  g.add(box);
-  // blinkenlights
-  for (let i = 0; i < 4; i++) {
-    const led = new THREE.Mesh(
-      new THREE.SphereGeometry(0.04, 6, 4),
-      new THREE.MeshStandardMaterial({ color: 0x53d8e8, emissive: 0x53d8e8, emissiveIntensity: 0.8 }),
-    );
-    led.position.set(-0.18 + i * 0.12, 0.31, 0.31);
-    g.add(led);
-  }
-  return g;
-}
 
 function makeMeterMesh(defaultDir: number, overflowDir: number): THREE.Group {
   const g = new THREE.Group();
@@ -510,12 +664,23 @@ export function makeGhostHub(): THREE.Group {
   return ghostify(makeHubMesh());
 }
 
-export function makeGhostSwitch(): THREE.Group {
-  return ghostify(makeSwitchMesh());
-}
-
 export function makeGhostMeter(): THREE.Group {
   return ghostify(makeMeterMesh(0, 1));
+}
+
+function makeTinyLabel(text: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = 'bold 40px Consolas, monospace';
+  ctx.fillStyle = '#0b0e13';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 34);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
+  sprite.scale.set(0.5, 0.5, 1);
+  return sprite;
 }
 
 function ghostify(g: THREE.Group): THREE.Group {

@@ -9,8 +9,8 @@
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
 import * as THREE from 'three';
-import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, makeGhostSwitch, orientGhost } from './game/board';
-import { camRows } from './game/machines';
+import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, orientGhost } from './game/board';
+import { fdbRows } from './game/machines';
 import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
@@ -178,11 +178,13 @@ let ejectSide: 1 | -1 = 1;
 let painting = false;
 let erasing = false;
 
+let switchDragStart: { col: number; row: number } | null = null;
+let switchDragEnd: { col: number; row: number } | null = null;
+
 const ghosts: Record<string, THREE.Group> = {
   belt: makeGhostBelt(),
   filter: makeGhostFilter(),
   hub: makeGhostHub(),
-  switch: makeGhostSwitch(),
   meter: makeGhostMeter(),
 };
 for (const g of Object.values(ghosts)) {
@@ -212,10 +214,14 @@ hud.bindClearFloor(() => {
   hud.log('pigeon-isp', 'floor bulldozed');
 });
 
+// The appliance the player is currently editing ports on (select tool).
+let activeApplianceId: number | null = null;
+
 function openMachineInspector(col: number, row: number): void {
   const cell = board.cellAt(col, row);
   if (!cell) return;
   if (cell.type === 'filter') {
+    activeApplianceId = null;
     hud.openFilterPanel(
       { config: cell.config, matchDir: cell.matchDir, defaultDir: cell.defaultDir, error: cell.compiled.error },
       (s) => board.configureFilter(col, row, s.config, s.matchDir, s.defaultDir),
@@ -224,22 +230,30 @@ function openMachineInspector(col: number, row: number): void {
         return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
       },
     );
-  } else if (cell.type === 'switch') {
-    hud.openSwitchPanel(() => {
-      const c = board.cellAt(col, row);
-      if (c?.type !== 'switch') return null;
-      return { rows: camRows(c.state, performance.now()), floods: c.state.floods, forwards: c.state.forwards, ttlMs: c.state.ttlMs };
+  } else if (cell.type === 'appliance-body' || cell.type === 'appliance-port') {
+    const app = board.applianceAt(col, row);
+    if (!app) return;
+    activeApplianceId = app.id;
+    hud.openSwitchPanel(app.id, () => {
+      const a = board.getAppliance(app.id);
+      if (!a) return null;
+      return {
+        ports: a.ports.length, rows: fdbRows(a.state, performance.now()),
+        floods: a.state.floods, forwards: a.state.forwards, filters: a.state.filters, ttlMs: a.state.ttlMs,
+      };
     });
   } else if (cell.type === 'meter') {
+    activeApplianceId = null;
     hud.openMeterPanel(
-      { thresholdPps: cell.state.thresholdPps, defaultDir: cell.defaultDir, overflowDir: cell.overflowDir },
-      (th, dd, od) => board.configureMeter(col, row, th, dd, od),
+      { limit: cell.state.limit, mode: cell.state.mode, defaultDir: cell.defaultDir, overflowDir: cell.overflowDir },
+      (limit, mode, dd, od) => board.configureMeter(col, row, limit, mode, dd, od),
       () => {
         const c = board.cellAt(col, row);
-        return c?.type === 'meter' ? { rate: c.state.lastRate, total: c.state.total, overTotal: c.state.overTotal } : null;
+        return c?.type === 'meter' ? { rate: c.state.rate, total: c.state.total, diverted: c.state.diverted, mode: c.state.mode } : null;
       },
     );
   } else if (cell.type === 'hub') {
+    activeApplianceId = null;
     hud.openHubPanel(() => {
       const c = board.cellAt(col, row);
       return c?.type === 'hub' ? c.count : null;
@@ -271,6 +285,11 @@ window.addEventListener('pointermove', (e) => {
       ghost.visible = false;
     }
   }
+  if (tool === 'switch' && switchDragStart) {
+    const hit = world.pickGround();
+    const cell = hit ? board.worldToCell(hit) : null;
+    if (cell) switchDragEnd = cell;
+  }
   paintAtPointer();
 });
 
@@ -280,50 +299,58 @@ window.addEventListener('pointerdown', (e) => {
   world.setPointer(e.clientX, e.clientY);
 
   if (tool === 'select') {
-    // Pigeons first, then filter machines.
+    // Pigeons first (world objects above the floor).
     const hit = world.pickObjects(pigeons.pickablesByMesh());
     let obj = hit?.object ?? null;
     while (obj && !obj.userData.pigeon) obj = obj.parent;
     if (obj?.userData.pigeon) {
-      const p = obj.userData.pigeon;
-      hud.inspect(p.decoded, p.token);
+      hud.inspect(obj.userData.pigeon.decoded, obj.userData.pigeon.token);
       return;
     }
-    const fhit = world.pickObjects(board.machineMeshes());
-    let fobj = fhit?.object ?? null;
-    while (fobj && !fobj.userData.boardCell) fobj = fobj.parent;
-    if (fobj?.userData.boardCell) {
-      const { col, row } = fobj.userData.boardCell;
-      openMachineInspector(col, row);
-      return;
+    // Otherwise dispatch by what's under the cursor on the floor.
+    const g = world.pickGround();
+    const cell = g ? board.worldToCell(g) : null;
+    if (!cell) { hud.closeInspector(); hud.closeFilterPanel(); activeApplianceId = null; return; }
+    // Editing an appliance's ports: clicking its perimeter toggles a port.
+    if (activeApplianceId !== null) {
+      const app = board.getAppliance(activeApplianceId);
+      if (app && app.cells.has(`${cell.col},${cell.row}`)) {
+        board.togglePort(activeApplianceId, cell.col, cell.row);
+        return;
+      }
     }
-    hud.closeInspector();
-    hud.closeFilterPanel();
+    const c = board.cellAt(cell.col, cell.row);
+    if (c && c.type !== 'roost' && c.type !== 'landing' && c.type !== 'belt') {
+      openMachineInspector(cell.col, cell.row);
+    } else {
+      hud.closeInspector(); hud.closeFilterPanel(); activeApplianceId = null;
+    }
     return;
   }
   if (tool === 'filter') {
-    // Filters place one per CLICK (no drag-paint: an accidental row of
-    // default-programmed filters is how routers lie to you), and the editor
-    // opens immediately.
     const hit = world.pickGround();
     const cell = hit ? board.worldToCell(hit) : null;
     if (cell) {
-      // default exit = build direction; match exit starts beside it (E flips
-      // which side) — both editable in the panel that opens right away.
       const matchDir = (buildDir + ejectSide + 4) % 4;
       board.setFilter(cell.col, cell.row, matchDir, buildDir);
       openMachineInspector(cell.col, cell.row);
     }
     return;
   }
-  if (tool === 'switch' || tool === 'meter') {
+  if (tool === 'meter') {
     const hit = world.pickGround();
     const cell = hit ? board.worldToCell(hit) : null;
     if (cell) {
-      if (tool === 'switch') board.setSwitch(cell.col, cell.row);
-      else board.setMeter(cell.col, cell.row, buildDir, (buildDir + ejectSide + 4) % 4);
+      board.setMeter(cell.col, cell.row, buildDir, (buildDir + ejectSide + 4) % 4);
       openMachineInspector(cell.col, cell.row);
     }
+    return;
+  }
+  if (tool === 'switch') {
+    // Drag a rectangle for the switch body.
+    const hit = world.pickGround();
+    const cell = hit ? board.worldToCell(hit) : null;
+    if (cell) { switchDragStart = cell; switchDragEnd = cell; }
     return;
   }
   painting = tool === 'belt' || tool === 'hub';
@@ -334,6 +361,17 @@ window.addEventListener('pointerdown', (e) => {
 window.addEventListener('pointerup', () => {
   painting = false;
   erasing = false;
+  if (tool === 'switch' && switchDragStart && switchDragEnd) {
+    const id = board.createSwitch(switchDragStart.col, switchDragStart.row, switchDragEnd.col, switchDragEnd.row);
+    if (id !== null) {
+      hud.setTool('select');
+      activeApplianceId = id;
+      openMachineInspector(switchDragStart.col, switchDragStart.row);
+      hud.log('pigeon-isp', 'switch placed — click its edge cells to add ports');
+    }
+  }
+  switchDragStart = null;
+  switchDragEnd = null;
 });
 
 window.addEventListener('keydown', (e) => {
