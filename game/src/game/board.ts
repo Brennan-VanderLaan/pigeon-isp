@@ -1019,16 +1019,16 @@ function makeCrossingMesh(): THREE.Group {
   return g;
 }
 
-export function makeGhostBelt(): THREE.Group {
-  return ghostify(makeBeltMesh(0));
+export function makeGhostBelt(dir = 0): THREE.Group {
+  return ghostify(makeBeltMesh(dir));
 }
 
 export function makeGhostCrossing(): THREE.Group {
   return ghostify(makeCrossingMesh());
 }
 
-export function makeGhostFilter(): THREE.Group {
-  return ghostify(makeFilterMesh(1, 0));
+export function makeGhostFilter(matchDir = 1, defaultDir = 0): THREE.Group {
+  return ghostify(makeFilterMesh(matchDir, defaultDir));
 }
 
 function makeMidiMesh(dir: number): THREE.Group {
@@ -1069,20 +1069,20 @@ export function makeGhostHub(): THREE.Group {
   return ghostify(makeHubMesh());
 }
 
-export function makeGhostLearn(): THREE.Group {
-  return ghostify(makePrimMesh(0, 0x6fdc8c, 'L'));
+export function makeGhostLearn(dir = 0): THREE.Group {
+  return ghostify(makePrimMesh(dir, 0x6fdc8c, 'L'));
 }
 
-export function makeGhostLookup(): THREE.Group {
-  return ghostify(makePrimMesh(0, 0xb98aff, '?', 1));
+export function makeGhostLookup(dir = 0, missDir = 1): THREE.Group {
+  return ghostify(makePrimMesh(dir, 0xb98aff, '?', missDir));
 }
 
-export function makeGhostMeter(): THREE.Group {
-  return ghostify(makeMeterMesh(0, 1));
+export function makeGhostMeter(defaultDir = 0, overflowDir = 1): THREE.Group {
+  return ghostify(makeMeterMesh(defaultDir, overflowDir));
 }
 
-export function makeGhostMidi(): THREE.Group {
-  return ghostify(makeMidiMesh(0));
+export function makeGhostMidi(dir = 0): THREE.Group {
+  return ghostify(makeMidiMesh(dir));
 }
 
 function makeTinyLabel(text: string): THREE.Sprite {

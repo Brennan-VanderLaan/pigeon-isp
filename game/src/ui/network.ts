@@ -13,7 +13,11 @@ export class Network {
 
   show(): void {
     this.render();
-    this.timer = window.setInterval(() => this.render(), 2000);
+    // Don't clobber a zone-rule field mid-type on the periodic refresh.
+    this.timer = window.setInterval(() => {
+      const a = document.activeElement;
+      if (!(a && this.el.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT'))) this.render();
+    }, 2000);
   }
   hide(): void {
     if (this.timer !== null) clearInterval(this.timer);

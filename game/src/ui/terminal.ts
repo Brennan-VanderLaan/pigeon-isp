@@ -240,13 +240,33 @@ class TermWindow {
     });
   }
 
+  private lastCols = 0;
+  private lastRows = 0;
+
   private sendResize(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // Only tell the PTY when the GRID actually changed — a stream of identical
+    // resizes makes sh reprint its prompt on every SIGWINCH (the newline spam).
+    if (this.term.cols === this.lastCols && this.term.rows === this.lastRows) return;
+    this.lastCols = this.term.cols;
+    this.lastRows = this.term.rows;
     this.ws.send('\x01' + JSON.stringify({ cols: this.term.cols, rows: this.term.rows }));
   }
 
   private refit(): void {
     try { this.fit.fit(); this.sendResize(); } catch { /* not laid out yet */ }
+  }
+
+  // Throttled refit for live dragging: fit the xterm grid (cheap, local) but
+  // only push a PTY resize at most every 150ms, plus a final one on release.
+  private refitThrottle = 0;
+  private liveRefit(): void {
+    try { this.fit.fit(); } catch { /* not laid out */ }
+    const now = performance.now();
+    if (now - this.refitThrottle >= 150) {
+      this.refitThrottle = now;
+      this.sendResize();
+    }
   }
 
   // ---- window chrome ----------------------------------------------------------
@@ -278,12 +298,12 @@ class TermWindow {
       const move = (ev: PointerEvent) => {
         this.el.style.width = Math.max(320, ev.clientX - r.left) + 'px';
         this.el.style.height = Math.max(200, ev.clientY - r.top) + 'px';
-        this.refit(); // live: the PTY follows the window, like a real terminal
+        this.liveRefit(); // throttled — avoids SIGWINCH spam / prompt repeats
       };
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
-        this.refit();
+        this.refit(); // final exact size
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);

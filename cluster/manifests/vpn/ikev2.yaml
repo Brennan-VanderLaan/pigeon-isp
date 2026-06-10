@@ -57,13 +57,10 @@ data:
     }
   charon.conf: |
     charon {
-      # Userspace ESP via a TUN — no kernel IPsec needed.
-      load_modular = yes
-      plugins {
-        kernel-libipsec { load = yes }
-        kernel-netlink { load = no }
-      }
+      # This image only ships kernel-netlink (XFRM). Use it and route the
+      # client pool through an XFRM interface the bridge can read.
       install_routes = yes
+      install_virtual_ip = yes
     }
 ---
 apiVersion: apps/v1
@@ -99,15 +96,34 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              mkdir -p /etc/swanctl/conf.d /etc/strongswan.d
               cp /conf/swanctl.conf /etc/swanctl/swanctl.conf
               cp /conf/charon.conf /etc/strongswan.d/charon.conf
-              # self-signed server cert for the IKE responder
-              apk add --no-cache openssl >/dev/null 2>&1 || true
-              pki --gen --type ed25519 --outform pem > /etc/swanctl/private/server.key 2>/dev/null || true
-              /usr/sbin/charon &
-              sleep 3
-              swanctl --load-all || true
+              PKI=$(command -v pki || echo /usr/sbin/pki)
+
+              # Self-signed RSA server cert (RSA for broad client compat). The
+              # client (phone/Windows) must trust this CA — install ca.crt on
+              # the device, or accept on first connect.
+              "$PKI" --gen --type rsa --size 2048 --outform pem > /etc/swanctl/private/server.key
+              # A CA, then a server cert signed by it (clients install the CA
+              # to trust the gateway; the leaf carries the serverAuth flag +
+              # SAN the OS checks).
+              "$PKI" --gen --type rsa --size 2048 --outform pem > /etc/swanctl/private/ca.key
+              "$PKI" --self --ca --in /etc/swanctl/private/ca.key --type rsa \
+                --dn "CN=Pigeon ISP CA" --outform pem > /etc/swanctl/x509ca/ca.crt
+              "$PKI" --pub --in /etc/swanctl/private/server.key --type rsa | \
+                "$PKI" --issue --cacert /etc/swanctl/x509ca/ca.crt --cakey /etc/swanctl/private/ca.key \
+                  --dn "CN=pigeon.localhost" --san pigeon.localhost \
+                  --flag serverAuth --outform pem > /etc/swanctl/x509/server.crt
+              echo "=== server cert ==="; "$PKI" --print --in /etc/swanctl/x509/server.crt | head -8
+
+              # Locate the charon daemon (path varies: libexec vs lib).
+              CHARON=$(ls /usr/libexec/ipsec/charon /usr/lib/ipsec/charon /usr/sbin/charon 2>/dev/null | head -1)
+              echo "charon: $CHARON"
+              "$CHARON" &
+              for i in $(seq 1 30); do [ -S /var/run/charon.vici ] && break; sleep 1; done
+              swanctl --load-all
+              echo "=== loaded connections ==="; swanctl --list-conns
+              echo "=== links ==="; ip link 2>/dev/null || true
               wait
           volumeMounts:
             - name: conf

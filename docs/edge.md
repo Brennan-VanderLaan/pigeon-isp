@@ -93,16 +93,33 @@ add a VPN of type IKEv2, server = the published host, remote ID
 `pigeon.localhost`, username `pigeon`, password `pigeon-vpn` (lab defaults —
 change them in the ConfigMap). up.ps1 exposes UDP 500 + 4500.
 
-**Status — needs device testing.** The tunbridge half is solid and shares the
-verified `/port` substrate. The strongSwan half (swanctl config, libipsec TUN
-name, server cert, EAP) is standard but UNVERIFIED end-to-end here because it
-needs a real device to drive the handshake, and the strongSwan image's exact
-paths/commands may need a pass. Testing checklist:
-1. `kubectl -n pigeon-system logs deploy/ikev2-gateway -c charon` — charon up,
-   `swanctl --list-conns` shows `pigeon`.
-2. Connect a phone; `swanctl --list-sas` shows the SA, a pool IP is assigned.
-3. tunbridge logs `<ip> bridged`; the device appears as a host on the board.
-4. With a consumer routing, the phone can reach aviary hosts.
+**Status — responder UP; data plane is the remaining step.**
 
-If the libipsec TUN isn't named `ipsec0`, set tunbridge's `-dev` to match
-(`ip link` in the charon container).
+What works (verified in-cluster):
+- charon (strongSwan 6.0.6) starts healthy and loads the config: a self-signed
+  CA + serverAuth leaf cert (CN=pigeon.localhost), the `pigeonpool`
+  (10.99.0.192/27), and the `pigeon` IKEv2 connection. `swanctl --list-conns`
+  shows it ready, presenting a proper cert chain — the IKE responder is up.
+
+What's NOT wired yet — the **XFRM data plane**. This image ships only
+`kernel-netlink` (kernel XFRM), **not** `kernel-libipsec`, so decrypted client
+traffic does NOT land on a TUN — the kernel routes it via XFRM policy. So the
+TUN-reading `tunbridge` doesn't see it yet. The remaining work to carry client
+traffic onto the loft:
+1. Give the connection an `if_id_in/if_id_out` and create an **XFRM interface**
+   (`ip link add ipsec0 type xfrm if_id <n>`) in the charon container.
+2. Teach `tunbridge` an attach mode that reads that interface via AF_PACKET
+   (SOCK_DGRAM, raw IP) instead of creating a TUN — the per-source-IP bridging
+   logic is unchanged.
+3. Route the client pool through `ipsec0`.
+
+Testing checklist (once the data plane is wired, needs a real device):
+1. charon up + `swanctl --list-conns` shows `pigeon` (done).
+2. Connect a phone (IKEv2, server = published host, remote id pigeon.localhost,
+   EAP user `pigeon` / pass `pigeon-vpn`, trust the CA); `swanctl --list-sas`
+   shows the SA + assigned pool IP.
+3. tunbridge logs `<ip> bridged`; the device appears as a host on the board.
+4. With a consumer routing, the phone reaches aviary hosts.
+
+Until then, **WireGuard (the wg-gateway) is the working path for phones** — the
+official WireGuard apps import the VPN-tab config in one tap.

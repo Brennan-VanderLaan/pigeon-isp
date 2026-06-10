@@ -9,7 +9,7 @@
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
 import * as THREE from 'three';
-import { Board, makeGhostBelt, makeGhostCrossing, makeGhostFilter, makeGhostHub, makeGhostLearn, makeGhostLookup, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
+import { Board, makeGhostBelt, makeGhostCrossing, makeGhostFilter, makeGhostHub, makeGhostLearn, makeGhostLookup, makeGhostMeter, makeGhostMidi } from './game/board';
 import { fdbRows } from './game/machines';
 import { midi, triggerMidi } from './game/midi';
 import { tableRows } from './game/tables';
@@ -190,29 +190,40 @@ let erasing = false;
 let switchDragStart: { col: number; row: number } | null = null;
 let switchDragEnd: { col: number; row: number } | null = null;
 
-const ghosts: Record<string, THREE.Group> = {
-  belt: makeGhostBelt(),
-  cross: makeGhostCrossing(),
-  filter: makeGhostFilter(),
-  hub: makeGhostHub(),
-  meter: makeGhostMeter(),
-  midi: makeGhostMidi(),
-  learn: makeGhostLearn(),
-  lookup: makeGhostLookup(),
+// Ghost factories build the preview AT the current direction, so it matches
+// the placed mesh exactly (machines use absolute-direction arrows; rotating
+// the group would be 90° off). The active ghost is rebuilt on tool/rotate.
+const side = () => (buildDir + ejectSide + 4) % 4;
+const ghostFactories: Record<string, () => THREE.Group> = {
+  belt: () => makeGhostBelt(buildDir),
+  cross: () => makeGhostCrossing(),
+  filter: () => makeGhostFilter(side(), buildDir),
+  hub: () => makeGhostHub(),
+  meter: () => makeGhostMeter(buildDir, side()),
+  midi: () => makeGhostMidi(buildDir),
+  learn: () => makeGhostLearn(buildDir),
+  lookup: () => makeGhostLookup(buildDir, side()),
 };
-for (const g of Object.values(ghosts)) {
-  g.visible = false;
-  world.scene.add(g);
+let currentGhost: THREE.Group | null = null;
+
+function rebuildGhost(): void {
+  if (currentGhost) { world.scene.remove(currentGhost); currentGhost = null; }
+  const f = ghostFactories[tool];
+  if (f) {
+    currentGhost = f();
+    currentGhost.visible = false;
+    world.scene.add(currentGhost);
+  }
 }
 
 function activeGhost(): THREE.Group | null {
-  return ghosts[tool] ?? null;
+  return currentGhost;
 }
 
 hud.onToolChange = (t) => {
   tool = t;
-  for (const g of Object.values(ghosts)) g.visible = false;
   if (t !== 'select') hud.closeFilterPanel();
+  rebuildGhost();
 };
 hud.setTool('belt');
 
@@ -336,7 +347,6 @@ window.addEventListener('pointermove', (e) => {
     if (cell) {
       ghost.visible = true;
       ghost.position.copy(board.cellToWorld(cell.col, cell.row, 0.05));
-      orientGhost(ghost, buildDir);
     } else {
       ghost.visible = false;
     }
@@ -453,12 +463,12 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'c' || e.key === 'C') hud.setTool('cross');
   if (e.key === 'r' || e.key === 'R') {
     buildDir = (buildDir + 1) % 4;
-    const ghost = activeGhost();
-    if (ghost) orientGhost(ghost, buildDir);
+    rebuildGhost();
   }
   if (e.key === 'e' || e.key === 'E') {
     ejectSide = ejectSide === 1 ? -1 : 1;
-    hud.log('pigeon-isp', `filter eject side: ${ejectSide === 1 ? 'right' : 'left'}`);
+    hud.log('pigeon-isp', `eject/overflow side: ${ejectSide === 1 ? 'right' : 'left'}`);
+    rebuildGhost();
   }
   if (e.key === 'Escape') {
     hud.closeInspector();

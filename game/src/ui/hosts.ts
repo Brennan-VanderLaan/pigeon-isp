@@ -35,14 +35,20 @@ export class Hosts {
     this.timer = null;
   }
 
+  /** Don't clobber a field the user is typing in on the periodic refresh. */
+  private typing(): boolean {
+    const a = document.activeElement;
+    return !!a && this.el.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT');
+  }
+
   private async refresh(): Promise<void> {
     try {
       const r = await fetch('/api/hosts');
       const body = await r.json();
       this.hosts = body.hosts ?? [];
-      this.render();
+      if (!this.typing()) this.render();
     } catch (e) {
-      this.el.innerHTML = `<h2>Hosts</h2><div class="sub bad">tower unreachable: ${(e as Error).message}</div>`;
+      if (!this.typing()) this.el.innerHTML = `<h2>Hosts</h2><div class="sub bad">tower unreachable: ${(e as Error).message}</div>`;
     }
   }
 
