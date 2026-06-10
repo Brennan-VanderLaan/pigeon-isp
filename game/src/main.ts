@@ -206,13 +206,25 @@ hud.bindClearFloor(() => {
   hud.log('pigeon-isp', 'floor bulldozed');
 });
 
+function openFilterEditor(col: number, row: number): void {
+  const cell = board.cellAt(col, row);
+  if (cell?.type !== 'filter') return;
+  hud.openFilterPanel(
+    { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, error: cell.compiled.error },
+    (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side),
+    () => {
+      const c = board.cellAt(col, row);
+      return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
+    },
+  );
+}
+
 function paintAtPointer(): void {
   const hit = world.pickGround();
   if (!hit) return;
   const cell = board.worldToCell(hit);
   if (!cell) return;
   if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
-  if (tool === 'filter' && painting) board.setFilter(cell.col, cell.row, buildDir, ejectSide);
   if (tool === 'erase' && erasing) board.eraseMachine(cell.col, cell.row);
 }
 
@@ -253,20 +265,26 @@ window.addEventListener('pointerdown', (e) => {
     while (fobj && !fobj.userData.boardCell) fobj = fobj.parent;
     if (fobj?.userData.boardCell) {
       const { col, row } = fobj.userData.boardCell;
-      const cell = board.cellAt(col, row);
-      if (cell?.type === 'filter') {
-        hud.openFilterPanel(
-          { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, error: cell.compiled.error },
-          (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side),
-        );
-      }
+      openFilterEditor(col, row);
       return;
     }
     hud.closeInspector();
     hud.closeFilterPanel();
     return;
   }
-  painting = tool === 'belt' || tool === 'filter';
+  if (tool === 'filter') {
+    // Filters place one per CLICK (no drag-paint: an accidental row of
+    // default-programmed filters is how routers lie to you), and the editor
+    // opens immediately.
+    const hit = world.pickGround();
+    const cell = hit ? board.worldToCell(hit) : null;
+    if (cell) {
+      board.setFilter(cell.col, cell.row, buildDir, ejectSide);
+      openFilterEditor(cell.col, cell.row);
+    }
+    return;
+  }
+  painting = tool === 'belt';
   erasing = tool === 'erase';
   paintAtPointer();
 });

@@ -114,6 +114,14 @@ export class Pigeon {
         return cell.dir;
       case 'filter': {
         const matched = cell.compiled.match(this.decoded);
+        // Score the machine: the editor shows live verdicts (ring buffer,
+        // cheap enough to run at 5000x).
+        const st = cell.stats;
+        if (matched) st.hits++;
+        else st.misses++;
+        st.recent[st.ptr % st.recent.length] = { summary: this.decoded.summary, matched };
+        st.ptr++;
+        cell.lastFrame = this.token.snapshot;
         const ejected = cell.matchToSide ? matched : !matched;
         return ejected ? (cell.dir + cell.side + 4) % 4 : cell.dir;
       }

@@ -65,8 +65,23 @@
       background: #1a2230; color: var(--text); border: 1px solid var(--edge);
       border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
     }
-    #filtercfg .err { color: var(--bad); font-size: 12px; margin-top: 6px; }
+    #filtercfg .err { color: var(--good); font-size: 12px; }
     #filtercfg .hint2 { color: var(--dim); font-size: 11px; margin-top: 4px; }
+    #filtercfg .fc-grid { display: grid; grid-template-columns: 220px 300px; gap: 16px; }
+    .hexview {
+      background: #0c1118; border: 1px solid var(--edge); border-radius: 6px;
+      padding: 8px; font-size: 11px; line-height: 1.5; white-space: pre;
+      color: #5f6b7a;
+    }
+    .hexview .off { color: #3d4654; }
+    .hexview .asc { color: #4a5563; }
+    .hexview .hl {
+      background: rgba(255, 179, 71, 0.25); color: var(--accent);
+      border-radius: 2px; font-weight: bold;
+    }
+    .verdicts { font-size: 11px; max-height: 110px; overflow-y: auto; }
+    .verdicts .v-hit { color: #b98aff; }
+    .verdicts .v-miss { color: var(--dim); }
 
     #banner {
       top: 56px; left: 50%; transform: translateX(-50%);
@@ -150,7 +165,7 @@
     <span id="speed-label" style="min-width:46px">1.0×</span>
     <button id="clear-floor" title="bulldoze all belts and filters">🧹</button>
   </div>
-  <div id="filtercfg" class="panel" style="display:none; bottom: 64px; right: 10px; width: 320px;"></div>
+  <div id="filtercfg" class="panel" style="display:none; bottom: 64px; right: 10px; width: 580px;"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

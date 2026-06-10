@@ -8,7 +8,7 @@
 // The floor persists to localStorage — your router survives a refresh.
 import * as THREE from 'three';
 import type { PortInfo } from '../types';
-import { compileFilter, type CompiledFilter, type FilterConfig } from './filters';
+import { compileFilter, describeFilter, newFilterStats, type CompiledFilter, type FilterConfig, type FilterStats } from './filters';
 
 export const COLS = 24;
 export const ROWS = 14;
@@ -27,6 +27,7 @@ export type Cell =
   | {
       type: 'filter'; dir: number; side: 1 | -1; matchToSide: boolean;
       config: FilterConfig; compiled: CompiledFilter; mesh: THREE.Group;
+      stats: FilterStats; lastFrame?: Uint8Array;
     }
   | { type: 'roost'; port: PortInfo; facing: number; mesh: THREE.Group }
   | { type: 'landing'; port: PortInfo; mesh: THREE.Group };
@@ -119,9 +120,11 @@ export class Board {
     const mesh = makeFilterMesh(dir, side);
     mesh.position.copy(this.cellToWorld(col, row, 0.04));
     mesh.userData.boardCell = { col, row };
+    attachRuleLabel(mesh, cfg);
     this.group.add(mesh);
     this.cells.set(key(col, row), {
       type: 'filter', dir, side, matchToSide, config: cfg, compiled: compileFilter(cfg), mesh,
+      stats: newFilterStats(),
     });
     this.onChange();
   }
@@ -140,7 +143,9 @@ export class Board {
       c.mesh.userData.boardCell = { col, row };
       this.group.add(c.mesh);
     }
+    attachRuleLabel(c.mesh, config);
     c.compiled = compileFilter(config);
+    c.stats = newFilterStats(); // new rule, fresh score
     this.onChange();
     return c.compiled.error;
   }
@@ -334,6 +339,32 @@ function ghostify(g: THREE.Group): THREE.Group {
 
 export function orientGhost(g: THREE.Group, dir: number): void {
   orient(g, dir);
+}
+
+// Every filter wears its rule on the floor — an unprogrammed default in a
+// chain should be impossible to miss.
+function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig): void {
+  const old = mesh.userData.ruleLabel as THREE.Sprite | undefined;
+  if (old) mesh.remove(old);
+  const canvas = document.createElement('canvas');
+  canvas.width = 384;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(26,18,40,0.88)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#3a2f4d';
+  ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+  ctx.font = '30px Consolas, monospace';
+  ctx.fillStyle = '#b98aff';
+  ctx.fillText(describeFilter(cfg).slice(0, 24), 12, 42);
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  sprite.scale.set(1.7, 0.28, 1);
+  sprite.position.y = 0.72;
+  // Counter-rotate so the label reads upright regardless of machine facing.
+  sprite.userData.isLabel = true;
+  mesh.add(sprite);
+  mesh.userData.ruleLabel = sprite;
 }
 
 function makeRoostMesh(port: PortInfo): THREE.Group {
