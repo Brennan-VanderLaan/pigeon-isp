@@ -221,10 +221,12 @@ func topology(ctx context.Context) (any, error) {
 // ---- /api/run: the speedtest ----------------------------------------------------
 
 type runReq struct {
-	Test    string `json:"test"`    // "baseline" | "pigeon"
-	Proto   string `json:"proto"`   // "tcp" | "udp"
-	Seconds int    `json:"seconds"` // default 10
-	Rate    string `json:"rate"`    // udp target, default "100M"
+	Test      string `json:"test"`      // "baseline" | "pigeon"
+	Proto     string `json:"proto"`     // "tcp" | "udp"
+	Seconds   int    `json:"seconds"`   // default 10
+	Rate      string `json:"rate"`      // udp target, default "100M"
+	Direction string `json:"direction"` // "up" | "down" | "both" (default both)
+	Parallel  int    `json:"parallel"`  // iperf3 -P streams, default 1
 }
 
 func runBench(w http.ResponseWriter, r *http.Request) {
@@ -244,70 +246,112 @@ func runBench(w http.ResponseWriter, r *http.Request) {
 	if req.Rate == "" {
 		req.Rate = "100M"
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.Seconds+45)*time.Second)
-	defer cancel()
-
-	before := loftStatsAll(ctx)
-	var result map[string]any
-	var err error
-	switch req.Test {
-	case "baseline":
-		result, err = runBaseline(ctx, req)
-	case "pigeon":
-		result, err = runPigeon(ctx, req)
-	default:
+	if req.Parallel <= 0 || req.Parallel > 32 {
+		req.Parallel = 1
+	}
+	if req.Direction == "" {
+		req.Direction = "both"
+	}
+	if req.Test != "baseline" && req.Test != "pigeon" {
 		http.Error(w, `{"error":"test must be baseline|pigeon"}`, 400)
 		return
 	}
-	if err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
+
+	// Direction → which iperf passes to run. "up" is client→server (the
+	// host transmitting); "down" is the reverse (-R, server→host). "both"
+	// runs them sequentially so up and down don't contend for the floor —
+	// and so an ASYMMETRIC route (different belts each way) shows up as
+	// different numbers.
+	dirs := []string{}
+	switch req.Direction {
+	case "up":
+		dirs = []string{"up"}
+	case "down":
+		dirs = []string{"down"}
+	default:
+		dirs = []string{"up", "down"}
 	}
-	result["loftStatsBefore"] = before
-	result["loftStatsAfter"] = loftStatsAll(ctx)
-	json.NewEncoder(w).Encode(result)
+
+	// Per-direction timeout budget.
+	budget := time.Duration((req.Seconds+20)*len(dirs)+15) * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), budget)
+	defer cancel()
+
+	before := loftStatsAll(ctx)
+	results := []map[string]any{}
+	var rtt map[string]any
+	var serverNode string
+	for _, dir := range dirs {
+		one, node, rt, err := runDirection(ctx, req, dir)
+		if err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		serverNode = node
+		if rt != nil {
+			rtt = rt
+		}
+		results = append(results, one)
+	}
+
+	out := map[string]any{
+		"test": req.Test, "proto": req.Proto, "parallel": req.Parallel,
+		"serverNode": serverNode, "rtt": rtt, "directions": results,
+		"loftStatsBefore": before, "loftStatsAfter": loftStatsAll(ctx),
+	}
+	json.NewEncoder(w).Encode(out)
 }
 
-// runBaseline: tower itself (infra net) -> baseline-server pod. Pure kernel
-// path; this is the node network's practical ceiling.
-func runBaseline(ctx context.Context, req runReq) (map[string]any, error) {
-	ip, node, err := podIP(ctx, "pigeon-system", "baseline-server")
-	if err != nil {
-		return nil, err
+// runDirection runs one iperf3 pass (up or down) for the selected test, plus a
+// one-time RTT probe (only on the first pass — RTT doesn't have a direction
+// here). Returns the direction result, the server node, and rtt (or nil).
+func runDirection(ctx context.Context, req runReq, dir string) (map[string]any, string, map[string]any, error) {
+	reverse := dir == "down"
+	var ip, node, rttOut string
+	var iperfOut string
+	wantRTT := dir == "up" || req.Direction == "down"
+
+	if req.Test == "baseline" {
+		var err error
+		ip, node, err = podIP(ctx, "pigeon-system", "baseline-server")
+		if err != nil {
+			return nil, "", nil, err
+		}
+		if wantRTT {
+			rttOut = localRun(ctx, "ping", "-c", "5", "-W", "2", ip)
+		}
+		iperfOut = localRun(ctx, iperfArgs(ip, req, reverse)...)
+	} else {
+		var err error
+		ip, node, err = podIP(ctx, "aviary", "bench-server")
+		if err != nil {
+			return nil, "", nil, err
+		}
+		if wantRTT {
+			rttOut, _ = podExec(ctx, "aviary", "alice", []string{"ping", "-c", "5", "-W", "3", ip})
+		}
+		iperfOut, err = podExec(ctx, "aviary", "bench-client", iperfArgs(ip, req, reverse))
+		if err != nil && !strings.Contains(iperfOut, "{") {
+			return nil, "", nil, fmt.Errorf("exec iperf3 (%s): %v (%s)", dir, err, firstLine(iperfOut))
+		}
 	}
-	rtt, _ := parsePing(localRun(ctx, "ping", "-c", "5", "-W", "2", ip))
-	out := localRun(ctx, iperfArgs(ip, req)...)
-	iperf := parseIperf(out)
-	return map[string]any{
-		"test": "baseline", "proto": req.Proto, "serverNode": node,
-		"rtt": rtt, "iperf": iperf,
-	}, nil
+
+	var rtt map[string]any
+	if wantRTT {
+		rtt, _ = parsePing(rttOut)
+	}
+	return map[string]any{"direction": dir, "iperf": parseIperf(iperfOut)}, node, rtt, nil
 }
 
-// runPigeon: exec iperf3 inside aviary/bench-client against bench-server.
-// Every frame rides the loft mesh; a consumer must be routing or this reads
-// 0.0 and that's the correct answer.
-func runPigeon(ctx context.Context, req runReq) (map[string]any, error) {
-	ip, node, err := podIP(ctx, "aviary", "bench-server")
-	if err != nil {
-		return nil, err
-	}
-	rttOut, _ := podExec(ctx, "aviary", "alice", []string{"ping", "-c", "5", "-W", "3", ip})
-	rtt, _ := parsePing(rttOut)
-	out, err := podExec(ctx, "aviary", "bench-client", iperfArgs(ip, req))
-	if err != nil && !strings.Contains(out, "{") {
-		return nil, fmt.Errorf("exec iperf3: %v (%s)", err, firstLine(out))
-	}
-	iperf := parseIperf(out)
-	return map[string]any{
-		"test": "pigeon", "proto": req.Proto, "serverNode": node,
-		"rtt": rtt, "iperf": iperf,
-	}, nil
-}
-
-func iperfArgs(ip string, req runReq) []string {
+func iperfArgs(ip string, req runReq, reverse bool) []string {
 	args := []string{"iperf3", "-c", ip, "-t", strconv.Itoa(req.Seconds), "--json", "--connect-timeout", "5000"}
+	if req.Parallel > 1 {
+		args = append(args, "-P", strconv.Itoa(req.Parallel))
+	}
+	if reverse {
+		args = append(args, "-R") // server → client (the "down" direction)
+	}
 	if req.Proto == "udp" {
 		args = append(args, "-u", "-b", req.Rate)
 	}
