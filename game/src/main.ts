@@ -9,7 +9,7 @@
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
 import * as THREE from 'three';
-import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostLearn, makeGhostLookup, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
+import { Board, makeGhostBelt, makeGhostCrossing, makeGhostFilter, makeGhostHub, makeGhostLearn, makeGhostLookup, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
 import { fdbRows } from './game/machines';
 import { midi, triggerMidi } from './game/midi';
 import { tableRows } from './game/tables';
@@ -191,6 +191,7 @@ let switchDragEnd: { col: number; row: number } | null = null;
 
 const ghosts: Record<string, THREE.Group> = {
   belt: makeGhostBelt(),
+  cross: makeGhostCrossing(),
   filter: makeGhostFilter(),
   hub: makeGhostHub(),
   meter: makeGhostMeter(),
@@ -317,6 +318,7 @@ function paintAtPointer(): void {
   const cell = board.worldToCell(hit);
   if (!cell) return;
   if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
+  if (tool === 'cross' && painting) board.setCrossing(cell.col, cell.row);
   if (tool === 'hub' && painting) board.setHub(cell.col, cell.row);
   if (tool === 'midi' && painting) board.setMidi(cell.col, cell.row, buildDir);
   if (tool === 'learn' && painting) board.setLearn(cell.col, cell.row, buildDir);
@@ -414,7 +416,7 @@ window.addEventListener('pointerdown', (e) => {
     if (cell) { switchDragStart = cell; switchDragEnd = cell; }
     return;
   }
-  painting = tool === 'belt' || tool === 'hub' || tool === 'midi' || tool === 'learn' || tool === 'lookup';
+  painting = tool === 'belt' || tool === 'cross' || tool === 'hub' || tool === 'midi' || tool === 'learn' || tool === 'lookup';
   erasing = tool === 'erase';
   paintAtPointer();
 });
@@ -447,6 +449,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '8') hud.setTool('learn');
   if (e.key === '9') hud.setTool('lookup');
   if (e.key === '0') hud.setTool('erase');
+  if (e.key === 'c' || e.key === 'C') hud.setTool('cross');
   if (e.key === 'r' || e.key === 'R') {
     buildDir = (buildDir + 1) % 4;
     const ghost = activeGhost();

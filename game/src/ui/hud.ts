@@ -9,7 +9,7 @@ import { KEY_FIELDS, type KeyField } from '../game/tables';
 import { hexDump, type Decoded } from '../net/decode';
 import type { FrameToken } from '../types';
 
-export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'learn' | 'lookup' | 'erase';
+export type Tool = 'select' | 'belt' | 'cross' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'learn' | 'lookup' | 'erase';
 
 export interface FilterPanelState {
   config: FilterConfig;

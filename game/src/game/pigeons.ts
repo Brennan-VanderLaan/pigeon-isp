@@ -155,6 +155,10 @@ export class Pigeon {
     switch (cell.type) {
       case 'belt':
         return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+      case 'crossing':
+        // Pass straight through: the pigeon keeps its travel direction, so
+        // crossing lanes don't merge.
+        return { kind: 'emit', emissions: [{ col, row, dir: this.travelDir }] };
       case 'filter': {
         const matched = cell.compiled.match(this.decoded);
         const exit = matched ? cell.matchDir : cell.defaultDir;

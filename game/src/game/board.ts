@@ -35,6 +35,9 @@ export const DIRS = [
 
 export type Cell =
   | { type: 'belt'; dir: number; mesh: THREE.Group }
+  // A crossing/overpass: pigeons pass STRAIGHT through, keeping their travel
+  // direction, so a horizontal lane and a vertical lane cross without merging.
+  | { type: 'crossing'; mesh: THREE.Group }
   | {
       type: 'filter'; matchDir: number; defaultDir: number;
       config: FilterConfig; compiled: CompiledFilter; mesh: THREE.Group;
@@ -247,6 +250,18 @@ export class Board {
     c.stats = newFilterStats(); // new rule, fresh score
     this.onChange();
     return c.compiled.error;
+  }
+
+  setCrossing(col: number, row: number): void {
+    if (!this.clearForBuild(col, row)) return;
+    const existing = this.cells.get(key(col, row));
+    if (existing?.type === 'crossing') return;
+    this.removeMachine(col, row);
+    const mesh = makeCrossingMesh();
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'crossing', mesh });
+    this.onChange();
   }
 
   setHub(col: number, row: number): void {
@@ -552,7 +567,7 @@ export class Board {
   }
 
   private static isMachine(t: string): boolean {
-    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'meter' || t === 'midi' ||
+    return t === 'belt' || t === 'crossing' || t === 'filter' || t === 'hub' || t === 'meter' || t === 'midi' ||
       t === 'learn' || t === 'lookup' ||
       t === 'appliance-body' || t === 'appliance-port-in' ||
       t === 'appliance-port-out' || t === 'appliance-pending';
@@ -675,6 +690,7 @@ export class Board {
     for (const [k, c] of this.cells) {
       const [col, row] = k.split(',').map(Number);
       if (c.type === 'belt') items.push({ t: 'b', col, row, dir: c.dir });
+      if (c.type === 'crossing') items.push({ t: 'x', col, row });
       if (c.type === 'filter') {
         items.push({ t: 'f', col, row, md: c.matchDir, dd: c.defaultDir, cfg: c.config });
       }
@@ -709,6 +725,7 @@ export class Board {
       const items = JSON.parse(raw) as any[];
       for (const it of items) {
         if (it.t === 'b') this.setBelt(it.col, it.row, it.dir);
+        if (it.t === 'x') this.setCrossing(it.col, it.row);
         if (it.t === 'h') this.setHub(it.col, it.row);
         // 's' (legacy 1x1 switch) is intentionally dropped — superseded by
         // multi-port appliances.
@@ -867,8 +884,37 @@ function setBadge(mesh: THREE.Group, text: string, color: string): void {
   mesh.userData.badge = sprite;
 }
 
+function makeCrossingMesh(): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, beltBaseMat));
+  // two perpendicular lanes, the E-W one raised over the N-S one (an overpass)
+  const laneMat = new THREE.MeshStandardMaterial({ color: 0x3a4654, roughness: 0.7 });
+  const ns = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.05, CELL * 0.94), laneMat);
+  ns.position.y = 0.08;
+  g.add(ns);
+  const ew = new THREE.Mesh(new THREE.BoxGeometry(CELL * 0.94, 0.05, 0.34), laneMat);
+  ew.position.y = 0.15;
+  g.add(ew);
+  // chevrons on both lanes, both directions, so it reads as bidirectional
+  const chevMat = new THREE.MeshStandardMaterial({ color: 0x8a93a0 });
+  for (const [dir, y] of [[0, 0.18], [2, 0.18], [1, 0.11], [3, 0.11]] as const) {
+    const a = new THREE.Mesh(arrowGeo, chevMat);
+    a.scale.set(0.6, 0.6, 0.6);
+    const d = DIRS[dir];
+    a.position.set(d.dx * 0.3, y, d.dz * 0.3);
+    a.rotation.x = Math.PI / 2;
+    a.rotation.z = -Math.atan2(d.dx, d.dz);
+    g.add(a);
+  }
+  return g;
+}
+
 export function makeGhostBelt(): THREE.Group {
   return ghostify(makeBeltMesh(0));
+}
+
+export function makeGhostCrossing(): THREE.Group {
+  return ghostify(makeCrossingMesh());
 }
 
 export function makeGhostFilter(): THREE.Group {
