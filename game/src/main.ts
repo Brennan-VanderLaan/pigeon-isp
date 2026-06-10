@@ -107,7 +107,7 @@ const events: BridgeEvents = {
     tokensThisSecond++;
     bytesThisSecond += token.fullLen;
     if (autoroute) autorouteToken(token);
-    else pigeons.spawn(token);
+    else pigeons.enqueue(token);
   },
   onStats(stats: LoftStats) {
     let rxTotal = 0;
@@ -315,7 +315,7 @@ function frame(now: number): void {
     hud.setFps(fpsCount);
     const mbps = (bytesThisSecond * 8) / 1e6;
     const decideUs = decideCount > 0 ? decideUsSum / decideCount : null;
-    hud.setStats(portsById.size, currentPps || tokensThisSecond, mbps, pigeons.pigeons.length, totalDrops, decideUs);
+    hud.setStats(portsById.size, currentPps || tokensThisSecond, mbps, pigeons.pigeons.length, pigeons.queued(), totalDrops, decideUs);
     tokensThisSecond = 0;
     bytesThisSecond = 0;
     decideUsSum = 0;

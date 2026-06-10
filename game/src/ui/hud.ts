@@ -54,10 +54,10 @@ export class Hud {
     this.banner.textContent = text ?? '';
   }
 
-  setStats(ports: number, pps: number, mbps: number, pigeons: number, drops: number, decideUs: number | null): void {
+  setStats(ports: number, pps: number, mbps: number, pigeons: number, queued: number, drops: number, decideUs: number | null): void {
     this.statPorts.textContent = `ports: ${ports}`;
     this.statRate.textContent = `in: ${pps} pps · ${mbps >= 100 ? mbps.toFixed(0) : mbps.toFixed(1)} Mbps`;
-    this.statPigeons.textContent = `pigeons: ${pigeons}`;
+    this.statPigeons.textContent = queued > 0 ? `pigeons: ${pigeons} (+${queued} queued)` : `pigeons: ${pigeons}`;
     this.statDrops.textContent = `drops: ${drops}`;
     if (decideUs !== null) {
       this.statDecide.style.display = '';
@@ -99,13 +99,15 @@ export class Hud {
 
   // ---- speed control --------------------------------------------------------
 
-  /** Slider is log2-scaled: -2..5.65 → 0.25x..50x. */
+  /** Slider is log2-scaled: -2..12.29 → 0.25x..5000x. */
   bindSpeed(onChange: (mult: number) => void): void {
     const slider = document.getElementById('speed') as HTMLInputElement;
     const label = document.getElementById('speed-label')!;
     const apply = () => {
-      const mult = Math.pow(2, Number(slider.value));
-      label.textContent = (mult >= 10 ? mult.toFixed(0) : mult.toFixed(1)) + '×';
+      const mult = Math.min(Math.pow(2, Number(slider.value)), 5000);
+      label.textContent =
+        mult >= 1000 ? (mult / 1000).toFixed(1) + 'k×' :
+        mult >= 10 ? mult.toFixed(0) + '×' : mult.toFixed(1) + '×';
       onChange(mult);
     };
     slider.addEventListener('input', apply);
