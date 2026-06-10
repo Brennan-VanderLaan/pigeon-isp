@@ -16,6 +16,7 @@ import {
   meterLabel, newMeterState, newSwitchState, switchStep,
   type MeterMode, type MeterState, type SwitchState,
 } from './machines';
+import { defaultMidiCfg, type MidiCfg } from './midi';
 import type { Decoded } from '../net/decode';
 import type { Emission } from './pigeons';
 
@@ -40,7 +41,7 @@ export type Cell =
     }
   | { type: 'hub'; count: number; mesh: THREE.Group }
   | { type: 'meter'; state: MeterState; defaultDir: number; overflowDir: number; mesh: THREE.Group }
-  | { type: 'midi'; dir: number; cfg: MidiCfg; lastFireMs: number; fired: number; mesh: THREE.Group }
+  | { type: 'midi'; dir: number; cfg: MidiCfg; lastFireMs: number; fired: number; lastNotes: number[]; mesh: THREE.Group }
   // Multi-cell appliance: a body cell (solid), a port INPUT cell (frames
   // enter here), or a port OUTPUT cell (frames leave here). Belts are
   // one-way, so a port is two lanes — exactly like tx/rx wires on a real
@@ -82,20 +83,6 @@ export interface PortLoc {
   facing: number;
 }
 
-/** A MIDI block's configuration. `noteFromFrame` derives pitch from a byte
- *  of the frame so different traffic plays different notes. */
-export interface MidiCfg {
-  deviceId: string;
-  channel: number; // 0-15
-  note: number; // 0-127 (used when noteFromFrame is off)
-  velocity: number; // 0-127
-  cooldownMs: number; // min gap between notes (5000x would jam the port)
-  noteFromFrame: boolean;
-}
-
-export function defaultMidiCfg(): MidiCfg {
-  return { deviceId: '', channel: 0, note: 60, velocity: 100, cooldownMs: 80, noteFromFrame: false };
-}
 
 // Roost/landing pairs around the perimeter. The FIRST 8 indices are the
 // original layout (kept byte-stable so saved host->slot maps don't shift);
@@ -265,7 +252,7 @@ export class Board {
     mesh.position.copy(this.cellToWorld(col, row, 0.04));
     mesh.userData.boardCell = { col, row };
     this.group.add(mesh);
-    this.cells.set(key(col, row), { type: 'midi', dir, cfg: cfg ?? defaultMidiCfg(), lastFireMs: 0, fired: 0, mesh });
+    this.cells.set(key(col, row), { type: 'midi', dir, cfg: cfg ?? defaultMidiCfg(), lastFireMs: 0, fired: 0, lastNotes: [], mesh });
     this.onChange();
   }
 

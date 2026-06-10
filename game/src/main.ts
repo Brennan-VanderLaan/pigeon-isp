@@ -11,7 +11,9 @@
 import * as THREE from 'three';
 import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
 import { fdbRows } from './game/machines';
-import { midi } from './game/midi';
+import { midi, triggerMidi } from './game/midi';
+import { decodeFrame } from './net/decode';
+import { sampleFrame } from './game/filters';
 import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
@@ -267,18 +269,17 @@ function openMachineInspector(col: number, row: number): void {
     });
   } else if (cell.type === 'midi') {
     activeApplianceId = null;
-    hud.midiTest = () => midi.play(
-      (board.cellAt(col, row) as any).cfg.deviceId,
-      (board.cellAt(col, row) as any).cfg.channel,
-      (board.cellAt(col, row) as any).cfg.note,
-      (board.cellAt(col, row) as any).cfg.velocity,
-    );
+    // Test plays a sample frame through the live config.
+    hud.midiTest = () => {
+      const c = board.cellAt(col, row);
+      if (c?.type === 'midi') triggerMidi(c.cfg, decodeFrame(sampleFrame(), 590), sampleFrame());
+    };
     hud.openMidiPanel(
       { ...cell.cfg },
       (cfg) => board.configureMidi(col, row, cfg),
       () => midi.enable(),
       () => ({ ready: midi.ready, error: midi.error, outputs: midi.outputs() }),
-      () => { const c = board.cellAt(col, row); return c?.type === 'midi' ? c.fired : null; },
+      () => { const c = board.cellAt(col, row); return c?.type === 'midi' ? { fired: c.fired, lastNotes: c.lastNotes } : null; },
     );
   }
 }

@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { Board, DIRS, COLS, ROWS } from './board';
 import { hubExits, meterStep } from './machines';
-import { midi } from './midi';
+import { midi, triggerMidi } from './midi';
 import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
 import type { Bridge, FrameToken } from '../types';
 
@@ -81,6 +81,14 @@ export class Pigeon {
     this.toPos.copy(p);
     this.mesh.userData.pigeon = this;
     this.mesh.visible = true;
+    // Scroll size tracks frame size: a 64B ARP carries a thin note, a 1500B
+    // MTU frame a fat scroll. Log scale so the range 64B..9KB reads well.
+    const scroll = this.mesh.userData.scroll as THREE.Mesh;
+    if (scroll) {
+      const f = Math.max(0, Math.min(1, Math.log2(this.token.fullLen / 64) / Math.log2(9000 / 64)));
+      const s = 0.6 + f * 1.9; // 0.6x (tiny) .. 2.5x (jumbo)
+      scroll.scale.set(s, 1, s);
+    }
   }
 
   /** Returns: portId to deliver, -1 to drop, null to keep going. */
@@ -165,16 +173,12 @@ export class Pigeon {
         return { kind: 'emit', emissions: [{ col, row, dir: pass ? cell.defaultDir : cell.overflowDir }] };
       }
       case 'midi': {
-        // Play a note on pass-through, rate-limited (5000x would jam MIDI).
+        // Play music on pass-through, rate-limited (5000x would jam MIDI).
         const now = performance.now();
         if (midi.ready && now - cell.lastFireMs >= cell.cfg.cooldownMs) {
           cell.lastFireMs = now;
           cell.fired++;
-          // note-from-frame: pitch from a header byte so traffic is melodic.
-          const note = cell.cfg.noteFromFrame
-            ? 36 + (this.token.snapshot[Math.min(this.token.snapshot.length - 1, 19)] % 48)
-            : cell.cfg.note;
-          midi.play(cell.cfg.deviceId, cell.cfg.channel, note, cell.cfg.velocity);
+          cell.lastNotes = triggerMidi(cell.cfg, this.decoded, this.token.snapshot);
         }
         return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
       }
@@ -377,5 +381,6 @@ function makePigeonMesh(): THREE.Group {
   scroll.rotation.z = Math.PI / 2;
   g.add(scroll);
   g.userData.scrollMat = scrollMat;
+  g.userData.scroll = scroll; // for per-pigeon frame-size scaling
   return g;
 }

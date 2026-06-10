@@ -4,7 +4,7 @@ import {
   DIR_ARROWS, DIR_NAMES, FILTER_FIELDS, KIND_OPTIONS, fieldByteRanges, routingSummary, sampleFrame,
   type FilterConfig, type FilterStats,
 } from '../game/filters';
-import { noteName } from '../game/midi';
+import { CHORDS, FRAME_SOURCES, SCALES, noteName, type MidiCfg } from '../game/midi';
 import { hexDump, type Decoded } from '../net/decode';
 import type { FrameToken } from '../types';
 
@@ -383,48 +383,97 @@ export class Hud {
   }
 
   openMidiPanel(
-    cfg: { deviceId: string; channel: number; note: number; velocity: number; cooldownMs: number; noteFromFrame: boolean },
-    onApply: (cfg: { deviceId: string; channel: number; note: number; velocity: number; cooldownMs: number; noteFromFrame: boolean }) => void,
+    cfg: MidiCfg,
+    onApply: (cfg: MidiCfg) => void,
     enableMidi: () => Promise<void>,
     midiState: () => { ready: boolean; error: string; outputs: { id: string; name: string }[] },
-    live: () => number | null,
+    live: () => { fired: number; lastNotes: number[] } | null,
   ): void {
     this.closeFilterPanel();
     this.filterPanel.style.display = 'block';
     const render = () => {
       const st = midiState();
-      const devOpts = st.outputs.map((o) => `<option value="${o.id}" ${o.id === cfg.deviceId ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
-      const notes = Array.from({ length: 61 }, (_, i) => i + 36)
-        .map((n) => `<option value="${n}" ${n === cfg.note ? 'selected' : ''}>${noteName(n)} (${n})</option>`).join('');
+      const opt = (v: string, sel: string, label: string) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${label}</option>`;
+      const devOpts = st.outputs.map((o) => opt(o.id, cfg.deviceId, esc(o.name))).join('');
+      const noteOpts = Array.from({ length: 73 }, (_, i) => i + 24)
+        .map((n) => `<option value="${n}" ${n === cfg.root ? 'selected' : ''}>${noteName(n)} (${n})</option>`).join('');
+      const srcOpts = (sel: string) => FRAME_SOURCES.map((s) => opt(s.id, sel, s.label)).join('');
+      const scaleOpts = Object.keys(SCALES).map((s) => opt(s, cfg.scale, s)).join('');
+      const chordOpts = Object.keys(CHORDS).map((c) => opt(c, cfg.chord, c)).join('');
+      const modeOpts = ['single', 'chord', 'arp'].map((m) => opt(m, cfg.mode, m)).join('');
+      const arpOpts = ['up', 'down', 'updown', 'random'].map((a) => opt(a, cfg.arpPattern, a)).join('');
       this.filterPanel.innerHTML = `
-        <h3>♪ MIDI block</h3>
-        <div class="hint2">fires a MIDI note each time a frame passes through — your traffic becomes music.
-        Rate-limited so 5000× doesn't jam the port. pigeon.localhost is a secure origin, so Web MIDI works here.</div>
+        <h3>♪ MIDI block — frame sequencer</h3>
+        <div class="hint2">every frame becomes music: pick what part of the frame drives pitch and velocity,
+        quantize to a scale, and play single notes, chords, or arpeggios. Rate-limited so 5000× won't jam the port.</div>
         ${st.ready
           ? `<div class="hint2" style="color:var(--good)">● MIDI enabled · ${st.outputs.length} output(s)</div>`
           : `<div class="row"><button id="mi-enable">Enable MIDI</button><span class="err" style="color:${st.error ? 'var(--bad)' : 'var(--dim)'}">${esc(st.error || 'click to grant access')}</span></div>`}
-        <label>output device</label>
-        <select id="mi-dev">${devOpts || '<option>(none — enable MIDI / connect a device)</option>'}</select>
-        <div class="row">
-          <label style="margin:0">channel</label><input type="number" id="mi-ch" min="1" max="16" value="${cfg.channel + 1}" style="width:60px">
-          <label style="margin:0">velocity</label><input type="number" id="mi-vel" min="1" max="127" value="${cfg.velocity}" style="width:64px">
-          <label style="margin:0">cooldown</label><input type="number" id="mi-cd" min="0" max="2000" value="${cfg.cooldownMs}" style="width:64px">ms
-        </div>
-        <div class="row">
-          <label style="margin:0"><input type="checkbox" id="mi-nff" ${cfg.noteFromFrame ? 'checked' : ''}> note from frame</label>
-          <span id="mi-notewrap"><label style="margin:0">note</label><select id="mi-note" style="width:auto">${notes}</select></span>
+        <div class="fc-grid">
+          <div>
+            <label>output device</label><select id="mi-dev">${devOpts || '<option>(enable MIDI / connect a device)</option>'}</select>
+            <div class="row">
+              <label style="margin:0">channel</label><input type="number" id="mi-ch" min="1" max="16" value="${cfg.channel + 1}" style="width:54px">
+              <label style="margin:0">cooldown</label><input type="number" id="mi-cd" min="0" max="2000" value="${cfg.cooldownMs}" style="width:60px">ms
+              <label style="margin:0">gate</label><input type="number" id="mi-gate" min="20" max="2000" value="${cfg.gateMs}" style="width:60px">ms
+            </div>
+            <label>key / scale / range</label>
+            <div class="row">
+              <select id="mi-root" style="width:auto">${noteOpts}</select>
+              <select id="mi-scale" style="width:auto">${scaleOpts}</select>
+              <input type="number" id="mi-oct" min="1" max="5" value="${cfg.octaves}" style="width:46px" title="octaves"> oct
+            </div>
+          </div>
+          <div>
+            <label>pitch from</label>
+            <select id="mi-nsrc">${srcOpts(cfg.noteSource)}</select>
+            <span id="mi-bytewrap" style="display:${cfg.noteSource === 'byte' ? 'block' : 'none'}">
+              <label>byte offset</label><input type="number" id="mi-byte" min="0" max="127" value="${cfg.byteOffset}" style="width:64px">
+            </span>
+            <label>velocity from</label>
+            <div class="row">
+              <select id="mi-vsrc" style="width:auto">${opt('fixed', cfg.velSource, 'fixed')}${srcOpts(cfg.velSource).replace('selected', cfg.velSource === 'fixed' ? '' : 'selected')}</select>
+              <input type="number" id="mi-vel" min="1" max="127" value="${cfg.velocity}" style="width:54px" title="fixed velocity">
+            </div>
+            <label>play</label>
+            <div class="row">
+              <select id="mi-mode" style="width:auto">${modeOpts}</select>
+              <select id="mi-chord" style="width:auto" title="chord">${chordOpts}</select>
+            </div>
+            <div class="row" id="mi-arpwrap" style="display:${cfg.mode === 'arp' ? 'flex' : 'none'}">
+              <select id="mi-arp" style="width:auto">${arpOpts}</select>
+              <input type="number" id="mi-steps" min="1" max="16" value="${cfg.arpSteps}" style="width:46px" title="steps">
+              <input type="number" id="mi-arprate" min="10" max="1000" value="${cfg.arpRateMs}" style="width:60px" title="ms/step">ms
+            </div>
+          </div>
         </div>
         <div class="row"><button id="mi-apply">Apply</button><button id="mi-test">Test ♪</button><button id="fc-close">Close</button><span class="err" id="mi-ok"></span></div>
-        <div class="hint2" id="mi-live" style="margin-top:6px">notes fired: ${live() ?? 0}</div>`;
+        <div class="hint2" id="mi-live"></div>`;
       const q = <T extends HTMLElement>(s: string) => this.filterPanel.querySelector<T>(s)!;
       this.filterPanel.querySelector('#mi-enable')?.addEventListener('click', async () => { await enableMidi(); render(); });
-      const collect = () => ({
+      q('#mi-nsrc').addEventListener('change', () => {
+        q('#mi-bytewrap').style.display = q<HTMLSelectElement>('#mi-nsrc').value === 'byte' ? 'block' : 'none';
+      });
+      q('#mi-mode').addEventListener('change', () => {
+        q('#mi-arpwrap').style.display = q<HTMLSelectElement>('#mi-mode').value === 'arp' ? 'flex' : 'none';
+      });
+      const collect = (): MidiCfg => ({
         deviceId: q<HTMLSelectElement>('#mi-dev').value,
         channel: Math.max(0, Math.min(15, Number(q<HTMLInputElement>('#mi-ch').value) - 1)),
-        note: Number(q<HTMLSelectElement>('#mi-note').value),
-        velocity: Number(q<HTMLInputElement>('#mi-vel').value),
         cooldownMs: Number(q<HTMLInputElement>('#mi-cd').value),
-        noteFromFrame: q<HTMLInputElement>('#mi-nff').checked,
+        gateMs: Number(q<HTMLInputElement>('#mi-gate').value),
+        root: Number(q<HTMLSelectElement>('#mi-root').value),
+        scale: q<HTMLSelectElement>('#mi-scale').value as MidiCfg['scale'],
+        octaves: Number(q<HTMLInputElement>('#mi-oct').value),
+        noteSource: q<HTMLSelectElement>('#mi-nsrc').value as MidiCfg['noteSource'],
+        byteOffset: Number(q<HTMLInputElement>('#mi-byte')?.value ?? cfg.byteOffset),
+        velSource: q<HTMLSelectElement>('#mi-vsrc').value as MidiCfg['velSource'],
+        velocity: Number(q<HTMLInputElement>('#mi-vel').value),
+        mode: q<HTMLSelectElement>('#mi-mode').value as MidiCfg['mode'],
+        chord: q<HTMLSelectElement>('#mi-chord').value as MidiCfg['chord'],
+        arpPattern: q<HTMLSelectElement>('#mi-arp').value as MidiCfg['arpPattern'],
+        arpSteps: Number(q<HTMLInputElement>('#mi-steps').value),
+        arpRateMs: Number(q<HTMLInputElement>('#mi-arprate').value),
       });
       q('#mi-apply').addEventListener('click', () => { onApply(collect()); q('#mi-ok').textContent = '✓ set'; });
       q('#mi-test').addEventListener('click', () => { onApply(collect()); this.midiTest?.(); });
@@ -432,9 +481,10 @@ export class Hud {
     };
     render();
     this.filterTimer = window.setInterval(() => {
+      const lv = live();
       const el = this.filterPanel.querySelector('#mi-live');
-      if (el) el.textContent = `notes fired: ${live() ?? 0}`;
-    }, 700);
+      if (el && lv) el.textContent = `notes fired: ${lv.fired}${lv.lastNotes.length ? ' · last: ' + lv.lastNotes.map(noteName).join(' ') : ''}`;
+    }, 500);
   }
 
   midiTest?: () => void;
