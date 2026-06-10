@@ -57,7 +57,8 @@ func main() {
 	http.HandleFunc("/api/topology", withJSON(topology))
 	http.HandleFunc("/api/run", runBench)
 	http.HandleFunc("/api/hosts", hosts)                   // GET list, POST spawn, DELETE remove
-	http.HandleFunc("/api/shell", shell)                   // WebSocket: live TTY into an aviary pod
+	http.HandleFunc("/api/shell", shell)                   // WebSocket: live TTY (new or ?session= rejoin)
+	http.HandleFunc("/api/shells", withJSON(shellList))    // list live sessions to rejoin
 	http.HandleFunc("/api/workloads", workloads)           // GET list, POST create+start, DELETE stop
 	http.HandleFunc("/api/workloads/run", workloadRunOnce) // POST: trigger one immediate run
 	http.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

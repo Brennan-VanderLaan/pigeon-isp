@@ -114,6 +114,7 @@ const SLOTS: PortLoc[] = (() => {
 })();
 
 const STORE_KEY = 'pigeon-isp-floor-v1';
+const SLOT_KEY = 'pigeon-isp-slots-v1'; // host identity -> perimeter slot, stable across reloads
 
 const beltBase = new THREE.BoxGeometry(CELL * 0.94, 0.08, CELL * 0.94);
 const beltBaseMat = new THREE.MeshStandardMaterial({ color: 0x232c3a, roughness: 0.9 });
@@ -130,6 +131,7 @@ export class Board {
   cells = new Map<string, Cell>();
   private portLocs = new Map<number, PortLoc>();
   private usedSlots = new Set<number>();
+  private slotByIdent = new Map<string, number>(); // "ns/pod" -> slot index (persisted)
   private appliances = new Map<number, Appliance>();
   private nextApplianceId = 1;
   readonly group = new THREE.Group();
@@ -149,6 +151,22 @@ export class Board {
     grid.position.y = 0.01;
     grid.scale.set(COLS / Math.max(COLS, ROWS), 1, ROWS / Math.max(COLS, ROWS));
     this.group.add(grid);
+
+    try {
+      const raw = localStorage.getItem(SLOT_KEY);
+      if (raw) this.slotByIdent = new Map(Object.entries(JSON.parse(raw)));
+    } catch { /* no saved slot map yet */ }
+  }
+
+  private slotTaken(idx: number): boolean {
+    for (const v of this.slotByIdent.values()) if (v === idx) return true;
+    return false;
+  }
+
+  private saveSlots(): void {
+    try {
+      localStorage.setItem(SLOT_KEY, JSON.stringify(Object.fromEntries(this.slotByIdent)));
+    } catch { /* storage blocked */ }
   }
 
   cellToWorld(col: number, row: number, y = 0): THREE.Vector3 {
@@ -529,8 +547,19 @@ export class Board {
 
   addPort(port: PortInfo): void {
     if (this.portLocs.has(port.id)) return;
-    let slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i));
-    if (slotIdx < 0) slotIdx = 0;
+    // Stable slot per HOST IDENTITY (pod name + namespace), persisted — so a
+    // host always lands on the same perimeter spot across reloads and your
+    // belt layout keeps pointing at the right place. Port ids are reassigned
+    // every session and must NOT be the key.
+    const ident = `${port.namespace}/${port.pod}`;
+    let slotIdx = this.slotByIdent.get(ident);
+    if (slotIdx === undefined || this.usedSlots.has(slotIdx)) {
+      slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i) && !this.slotTaken(i));
+      if (slotIdx < 0) slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i));
+      if (slotIdx < 0) slotIdx = 0;
+      this.slotByIdent.set(ident, slotIdx);
+      this.saveSlots();
+    }
     this.usedSlots.add(slotIdx);
     const slot = SLOTS[slotIdx];
 

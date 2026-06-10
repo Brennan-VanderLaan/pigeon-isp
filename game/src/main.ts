@@ -20,7 +20,7 @@ import { Health } from './ui/health';
 import { Hosts } from './ui/hosts';
 import { Hud, type Tool } from './ui/hud';
 import { Speedtest } from './ui/speedtest';
-import { PodTerminal } from './ui/terminal';
+import { PodTerminal, restoreTerminals } from './ui/terminal';
 import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
 
 const params = new URLSearchParams(location.search);
@@ -461,6 +461,9 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 hud.log('pigeon-isp', 'welcome to the loft. paint belts (2), rotate with R, route the pigeons.');
+
+// Rejoin any pod shells that survived a reload (sessions live tower-side).
+restoreTerminals();
 
 // ---- views (factory / hosts / speedtest / health) -----------------------------
 

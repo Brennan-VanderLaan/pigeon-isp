@@ -22,14 +22,52 @@ class WindowManager {
     document.body.appendChild(this.taskbar);
   }
 
-  open(pod: string, ns: string): void {
+  open(pod: string, ns: string, sessionId?: string): void {
     // One window per pod: focus the existing one instead of stacking dupes.
     for (const w of this.wins) {
       if (w.pod === pod && w.ns === ns) { w.restore(); w.focus(); return; }
     }
-    const w = new TermWindow(pod, ns, this);
+    const w = new TermWindow(pod, ns, this, sessionId);
     this.wins.add(w);
     w.focus();
+  }
+
+  /** Sessions the player had open, remembered across reloads so windows
+   *  can auto-rejoin the live shells. */
+  private restoredKey = 'pigeon-isp-shell-sessions-v1';
+  rememberSession(pod: string, ns: string, sessionId: string): void {
+    try {
+      const m = this.savedSessions();
+      m[`${ns}/${pod}`] = sessionId;
+      localStorage.setItem(this.restoredKey, JSON.stringify(m));
+    } catch { /* storage blocked */ }
+  }
+  forgetSession(pod: string, ns: string): void {
+    try {
+      const m = this.savedSessions();
+      delete m[`${ns}/${pod}`];
+      localStorage.setItem(this.restoredKey, JSON.stringify(m));
+    } catch { /* */ }
+  }
+  private savedSessions(): Record<string, string> {
+    try { return JSON.parse(localStorage.getItem(this.restoredKey) || '{}'); } catch { return {}; }
+  }
+
+  /** On load, re-open windows for sessions that are still alive tower-side. */
+  async restoreSessions(): Promise<void> {
+    const saved = this.savedSessions();
+    if (!Object.keys(saved).length) return;
+    let live: Record<string, { id: string; pod: string; ns: string }> = {};
+    try {
+      const r = await fetch('/api/shells');
+      const body = await r.json();
+      for (const s of body.sessions ?? []) live[s.id] = s;
+    } catch { return; }
+    for (const [key, id] of Object.entries(saved)) {
+      const s = live[id];
+      if (s) this.open(s.pod, s.ns, id);
+      else { const [ns, pod] = key.split('/'); this.forgetSession(pod, ns); }
+    }
   }
 
   nextZ(): number {
@@ -57,10 +95,19 @@ class WindowManager {
 
 let manager: WindowManager | null = null;
 
+function mgr(): WindowManager {
+  if (!manager) manager = new WindowManager();
+  return manager;
+}
+
 /** Open (or focus) a terminal window for a pod. */
 export function openTerminal(pod: string, ns: string): void {
-  if (!manager) manager = new WindowManager();
-  manager.open(pod, ns);
+  mgr().open(pod, ns);
+}
+
+/** Re-open windows for shells that survived a page reload. */
+export function restoreTerminals(): void {
+  mgr().restoreSessions();
 }
 
 class TermWindow {
@@ -72,7 +119,10 @@ class TermWindow {
   private ws: WebSocket | null = null;
   private closed = false;
 
-  constructor(readonly pod: string, readonly ns: string, private mgr: WindowManager) {
+  private sessionId?: string;
+
+  constructor(readonly pod: string, readonly ns: string, private mgr: WindowManager, sessionId?: string) {
+    this.sessionId = sessionId;
     this.el = document.createElement('div');
     this.el.className = 'term-win';
     const w = 640, h = 380;
@@ -131,6 +181,9 @@ class TermWindow {
 
   close(): void {
     this.closed = true;
+    // Explicit close = done with this session: forget it so it isn't
+    // re-opened on reload. (Minimize keeps it; reload rejoins it.)
+    this.mgr.forgetSession(this.pod, this.ns);
     this.ws?.close();
     this.term.dispose();
     this.el.remove();
@@ -142,6 +195,7 @@ class TermWindow {
   private wsUrl(): string {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const base = location.port === '5173' ? `${proto}://${location.hostname}` : `${proto}://${location.host}`;
+    if (this.sessionId) return `${base}/api/shell?session=${encodeURIComponent(this.sessionId)}`;
     return `${base}/api/shell?pod=${encodeURIComponent(this.pod)}&ns=${encodeURIComponent(this.ns)}`;
   }
 
@@ -159,6 +213,14 @@ class TermWindow {
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
+        // The server's first text frame on a NEW session is {"session":"sh-N"}.
+        if (ev.data.startsWith('{') && ev.data.includes('"session"')) {
+          try {
+            const id = JSON.parse(ev.data).session;
+            if (id) { this.sessionId = id; this.mgr.rememberSession(this.pod, this.ns, id); }
+          } catch { /* not the session announce */ }
+          return;
+        }
         if (ev.data.startsWith('error: ')) this.term.write(`\r\n\x1b[31m${ev.data}\x1b[0m\r\n`);
         else this.term.write(ev.data);
       } else {
