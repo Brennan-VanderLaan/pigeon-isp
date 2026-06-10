@@ -82,7 +82,9 @@ tar -czf "$tmp\loft-src.tgz" -C "$repo\bridge" go.mod go.sum cmd
 if ($LASTEXITCODE -ne 0) { throw "failed to tar bridge source" }
 tar -czf "$tmp\game-src.tgz" -C "$repo\game" package.json index.html tsconfig.json vite.config.ts src
 if ($LASTEXITCODE -ne 0) { throw "failed to tar game source" }
-tar -czf "$tmp\tower-src.tgz" -C "$repo\tower" go.mod go.sum main.go
+# Tar every .go file (tower grew past a single main.go).
+$towerGo = Get-ChildItem "$repo\tower" -Filter *.go | Select-Object -ExpandProperty Name
+tar -czf "$tmp\tower-src.tgz" -C "$repo\tower" go.mod go.sum @towerGo
 if ($LASTEXITCODE -ne 0) { throw "failed to tar tower source" }
 
 Write-Host "==> deploying the loft (builds loftd + pigeon-cni in-cluster)" -ForegroundColor Cyan

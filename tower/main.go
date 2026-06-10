@@ -1,12 +1,13 @@
 // tower — the control tower: admin telemetry + benchmark trigger API.
 //
 // Speedtest-for-Pigeon-ISP: the same iperf3 run, two ways —
-//   baseline  tower's own pod (infra network) -> baseline-server pod on
-//             another node. Kernel routing all the way: this is what the
-//             node network can practically do.
-//   pigeon    exec into aviary/bench-client -> bench-server (different node,
-//             aviary network). Every frame rides the loft mesh and a consumer
-//             must be routing. The gap between the two numbers IS the product.
+//
+//	baseline  tower's own pod (infra network) -> baseline-server pod on
+//	          another node. Kernel routing all the way: this is what the
+//	          node network can practically do.
+//	pigeon    exec into aviary/bench-client -> bench-server (different node,
+//	          aviary network). Every frame rides the loft mesh and a consumer
+//	          must be routing. The gap between the two numbers IS the product.
 //
 // Plus /api/health and /api/usage: nodes, pods, per-node loft+trunk state,
 // and kubelet stats/summary (CPU/mem) without needing metrics-server.
@@ -55,6 +56,8 @@ func main() {
 	http.HandleFunc("/api/usage", withJSON(usage))
 	http.HandleFunc("/api/topology", withJSON(topology))
 	http.HandleFunc("/api/run", runBench)
+	http.HandleFunc("/api/hosts", hosts) // GET list, POST spawn, DELETE remove
+	http.HandleFunc("/api/shell", shell) // WebSocket: live TTY into an aviary pod
 	http.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"unknown endpoint"}`, 404)
 	})
@@ -155,8 +158,8 @@ func usage(ctx context.Context) (any, error) {
 		if err == nil {
 			var sum struct {
 				Node struct {
-					CPU    struct{ UsageNanoCores uint64 }    `json:"cpu"`
-					Memory struct{ WorkingSetBytes uint64 }   `json:"memory"`
+					CPU    struct{ UsageNanoCores uint64 }           `json:"cpu"`
+					Memory struct{ WorkingSetBytes uint64 }          `json:"memory"`
 					Fs     struct{ UsedBytes, CapacityBytes uint64 } `json:"fs"`
 				} `json:"node"`
 				Pods []struct {
@@ -181,7 +184,7 @@ func usage(ctx context.Context) (any, error) {
 				for _, p := range sum.Pods {
 					if p.CPU.UsageNanoCores > 0 {
 						top = append(top, map[string]any{
-							"pod": p.PodRef.Namespace + "/" + p.PodRef.Name,
+							"pod":           p.PodRef.Namespace + "/" + p.PodRef.Name,
 							"cpuMillicores": p.CPU.UsageNanoCores / 1e6,
 							"memBytes":      p.Memory.WorkingSetBytes,
 						})
