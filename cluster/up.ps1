@@ -109,6 +109,9 @@ kubectl apply -f "$PSScriptRoot\manifests\tower\"
 Write-Host "==> deploying the WireGuard VPN gateway" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\vpn\"
 
+Write-Host "==> deploying the uplink gateway (aviary -> the world, when you route it)" -ForegroundColor Cyan
+kubectl apply -f "$PSScriptRoot\manifests\uplink\"
+
 Write-Host "==> releasing the aviary (alice and bob)" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\aviary\"
 

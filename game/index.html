@@ -82,6 +82,11 @@
     .verdicts { font-size: 11px; max-height: 110px; overflow-y: auto; }
     .verdicts .v-hit { color: #b98aff; }
     .verdicts .v-miss { color: var(--dim); }
+    #vpn-tabs button {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer;
+    }
+    #vpn-tabs button.active { border-color: var(--accent); color: var(--accent); }
     .vpn-cfg {
       background: #0c1118; border: 1px solid var(--edge); border-radius: 6px;
       padding: 8px 10px; font-size: 11px; color: var(--dim); white-space: pre;

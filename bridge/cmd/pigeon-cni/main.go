@@ -52,6 +52,11 @@ const (
 	// inside it (10.99.<nodeOctet>.x) so node-local IPAM can't collide.
 	aviaryNet = "10.99"
 	firstHost = 10
+	// Aviary pods default-route through the uplink gateway (10.99.0.1) so they
+	// can reach the world — but only if the uplink agent is deployed AND the
+	// player routes the egress frames to it. Without that, off-net traffic
+	// just has nowhere to go (as it should).
+	aviaryGateway = "10.99.0.1"
 )
 
 type netConf struct {
@@ -214,6 +219,15 @@ func cmdAdd() error {
 			if err := netlink.RouteAdd(route); err != nil {
 				return fmt.Errorf("default route: %w", err)
 			}
+		} else if gameMode {
+			// Aviary pods default-route through the uplink gateway, reachable
+			// on-link over the flat L2. Best effort: it's fine if the gateway
+			// IP isn't live yet — the route just won't resolve until you build
+			// the path to the uplink.
+			netlink.RouteAdd(&netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Gw:        net.ParseIP(aviaryGateway),
+			})
 		}
 		link, err = netlink.LinkByName(ifname)
 		if err != nil {

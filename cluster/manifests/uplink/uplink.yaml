@@ -1,0 +1,63 @@
+# uplink — the gateway to the world. Dual-homed: it has a normal pod interface
+# (pigeon-system / infra net, which already has internet via the node's NAT)
+# AND registers as host 10.99.0.1 on the pigeon network via the loft /port.
+# Aviary pods default-route through it; you route their egress frames to the
+# uplink (build a firewall with filters/meters along the way), and the kernel
+# MASQUERADEs them out to the world.
+#
+# Deployed but INERT until you build a path: without belts carrying egress
+# frames to the uplink's landing (and replies back), aviary off-net traffic
+# simply doesn't go anywhere.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uplink
+  namespace: pigeon-system
+  labels:
+    app: uplink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uplink
+  template:
+    metadata:
+      labels:
+        app: uplink
+    spec:
+      containers:
+        - name: uplink
+          image: golang:1.24-alpine
+          securityContext:
+            privileged: true # NET_ADMIN for the TUN, iptables, ip_forward
+          env:
+            - name: GOMODCACHE
+              value: /gocache
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              apk add --no-cache iptables iproute2 >/dev/null
+              mkdir -p /build /out
+              tar xzf /src/loft-src.tgz -C /build
+              cd /build
+              CGO_ENABLED=0 go build -o /out/uplink ./cmd/uplink
+              exec /out/uplink -gateway 10.5.0.2:9777 -ip 10.99.0.1 -net 10.99.0.0/16
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: gocache
+              mountPath: /gocache
+            - name: tun
+              mountPath: /dev/net/tun
+      volumes:
+        - name: src
+          configMap:
+            name: loft-src
+        - name: gocache
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
