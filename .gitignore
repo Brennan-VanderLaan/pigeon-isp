@@ -6,3 +6,5 @@ bridge/pigeon-cni
 bridge/cmd/loftd/loftd
 bridge/cmd/pigeon-cni/pigeon-cni
 .vite/
+tower/tower
+.claude/
