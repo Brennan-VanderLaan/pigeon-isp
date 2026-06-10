@@ -1,0 +1,154 @@
+# IKEv2 gateway — native VPN clients (iOS, Android, Windows, macOS all have a
+# built-in IKEv2 client; NO app install) onto the pigeon network.
+#
+# Architecture:
+#   strongSwan (charon) terminates IKEv2 and does ESP in USERSPACE via the
+#   kernel-libipsec plugin — so it needs no kernel IPsec/XFRM modules, just a
+#   TUN device. Decrypted client traffic lands on that TUN. The tunbridge
+#   sidecar reads the TUN and bridges each client IP onto the loft as its own
+#   virtual host (per-peer), exactly like the WireGuard gateway.
+#
+#   phone (native IKEv2) ═ESP═► charon (libipsec) ─► TUN ─► tunbridge ─► loft
+#
+# Auth: EAP (username/password) — the friendliest for phones. The PSK/creds
+# below are lab defaults; change them. Clients use server = the published
+# IKEv2 port (up.ps1 exposes 500/4500 udp on a recreate).
+#
+# UNVERIFIED end-to-end: this needs a real device to exercise the IKEv2
+# handshake, and Talos must expose /dev/net/tun (it does by default). The
+# tunbridge half is the same proven /port bridging the perch + WireGuard
+# paths use. See docs/edge.md for the testing checklist.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ikev2-conf
+  namespace: pigeon-system
+data:
+  swanctl.conf: |
+    connections {
+      pigeon {
+        version = 2
+        proposals = aes256-sha256-modp2048,default
+        pools = pigeonpool
+        encap = yes
+        rekey_time = 0
+        local {
+          auth = pubkey
+          certs = server.crt
+          id = pigeon.localhost
+        }
+        remote {
+          auth = eap-mschapv2
+          eap_id = %any
+        }
+        children {
+          pigeon {
+            local_ts = 0.0.0.0/0
+            esp_proposals = aes256-sha256,default
+          }
+        }
+      }
+    }
+    pools {
+      pigeonpool { addrs = 10.99.0.192/27 }
+    }
+    secrets {
+      eap-demo { id = pigeon, secret = "pigeon-vpn" }
+    }
+  charon.conf: |
+    charon {
+      # Userspace ESP via a TUN — no kernel IPsec needed.
+      load_modular = yes
+      plugins {
+        kernel-libipsec { load = yes }
+        kernel-netlink { load = no }
+      }
+      install_routes = yes
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ikev2-gateway
+  namespace: pigeon-system
+  labels:
+    app: ikev2-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ikev2-gateway
+  template:
+    metadata:
+      labels:
+        app: ikev2-gateway
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      # strongSwan needs NET_ADMIN + /dev/net/tun for the libipsec TUN; the
+      # bridge shares the host net namespace so it sees the same TUN.
+      containers:
+        - name: charon
+          image: strongx509/strongswan:latest
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p /etc/swanctl/conf.d /etc/strongswan.d
+              cp /conf/swanctl.conf /etc/swanctl/swanctl.conf
+              cp /conf/charon.conf /etc/strongswan.d/charon.conf
+              # self-signed server cert for the IKE responder
+              apk add --no-cache openssl >/dev/null 2>&1 || true
+              pki --gen --type ed25519 --outform pem > /etc/swanctl/private/server.key 2>/dev/null || true
+              /usr/sbin/charon &
+              sleep 3
+              swanctl --load-all || true
+              wait
+          volumeMounts:
+            - name: conf
+              mountPath: /conf
+            - name: tun
+              mountPath: /dev/net/tun
+        - name: tunbridge
+          image: golang:1.24-alpine
+          securityContext:
+            privileged: true
+          env:
+            - name: GOMODCACHE
+              value: /gocache
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p /build /out
+              tar xzf /src/loft-src.tgz -C /build
+              cd /build
+              CGO_ENABLED=0 go build -o /out/tunbridge ./cmd/tunbridge
+              # wait for charon to create the libipsec TUN, then bridge it
+              sleep 8
+              exec /out/tunbridge -gateway 10.5.0.2:9777 -dev ipsec0 -gw-ip 10.99.0.198 -pool 10.99.0.192/27
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: gocache
+              mountPath: /gocache
+            - name: tun
+              mountPath: /dev/net/tun
+      volumes:
+        - name: conf
+          configMap:
+            name: ikev2-conf
+        - name: src
+          configMap:
+            name: loft-src
+        - name: gocache
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice

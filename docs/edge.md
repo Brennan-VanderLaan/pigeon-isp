@@ -71,3 +71,38 @@ Open design fork (needs a call before building):
 L2-over-tunnel (TAP) instead of WireGuard would make each desktop a true
 bridged host with its own ethernet stack, but TAP on Windows needs the
 OpenVPN tap driver — WireGuard's stock-client reach wins for "any desktop."
+
+## IKEv2 — native clients, no app install
+
+For phones and laptops that shouldn't have to install anything, IKEv2/IPsec
+is built into iOS, Android, Windows and macOS. We do NOT hand-roll IKE —
+`cluster/manifests/vpn/ikev2.yaml` runs **strongSwan** (charon) as the
+responder, with the **kernel-libipsec** plugin doing ESP in userspace so no
+kernel IPsec/XFRM modules are required — just `/dev/net/tun`. Decrypted client
+traffic lands on a TUN; the **tunbridge** sidecar (`bridge/cmd/tunbridge`)
+reads that TUN and bridges each client IP onto the loft as its own virtual
+host — the same proven `/port` per-peer bridging the WireGuard and perch
+paths use.
+
+```
+phone (built-in IKEv2) ═ESP═► charon (libipsec) ─► TUN ─► tunbridge ─► loft
+```
+
+Auth is EAP (username/password) — the friendliest on phones. Client setup:
+add a VPN of type IKEv2, server = the published host, remote ID
+`pigeon.localhost`, username `pigeon`, password `pigeon-vpn` (lab defaults —
+change them in the ConfigMap). up.ps1 exposes UDP 500 + 4500.
+
+**Status — needs device testing.** The tunbridge half is solid and shares the
+verified `/port` substrate. The strongSwan half (swanctl config, libipsec TUN
+name, server cert, EAP) is standard but UNVERIFIED end-to-end here because it
+needs a real device to drive the handshake, and the strongSwan image's exact
+paths/commands may need a pass. Testing checklist:
+1. `kubectl -n pigeon-system logs deploy/ikev2-gateway -c charon` — charon up,
+   `swanctl --list-conns` shows `pigeon`.
+2. Connect a phone; `swanctl --list-sas` shows the SA, a pool IP is assigned.
+3. tunbridge logs `<ip> bridged`; the device appears as a host on the board.
+4. With a consumer routing, the phone can reach aviary hosts.
+
+If the libipsec TUN isn't named `ipsec0`, set tunbridge's `-dev` to match
+(`ip link` in the charon container).

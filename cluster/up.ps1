@@ -44,7 +44,7 @@ if ($existing) {
         --name $clusterName `
         --provisioner docker `
         --workers $Workers `
-        --exposed-ports "80:80/tcp,9777:9777/tcp,51820:51820/udp" `
+        --exposed-ports "80:80/tcp,9777:9777/tcp,51820:51820/udp,500:500/udp,4500:4500/udp" `
         --config-patch "@$PSScriptRoot\talos-patch.yaml" `
         --wait=false
     if ($LASTEXITCODE -ne 0) { throw "talosctl cluster create failed" }
