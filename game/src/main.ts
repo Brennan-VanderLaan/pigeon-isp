@@ -16,8 +16,10 @@ import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
 import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
 import { Health } from './ui/health';
+import { Hosts } from './ui/hosts';
 import { Hud, type Tool } from './ui/hud';
 import { Speedtest } from './ui/speedtest';
+import { PodTerminal } from './ui/terminal';
 import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
 
 const params = new URLSearchParams(location.search);
@@ -112,6 +114,7 @@ const events: BridgeEvents = {
     else pigeons.enqueue(token);
   },
   onStats(stats: LoftStats) {
+    latestStats = stats; // roost diagnostics read per-pod counters from here
     let rxTotal = 0;
     let drops = stats.droppedNoConsumer;
     for (const s of Object.values(stats.ports)) {
@@ -320,9 +323,13 @@ window.addEventListener('pointerdown', (e) => {
       }
     }
     const c = board.cellAt(cell.col, cell.row);
-    if (c && c.type !== 'roost' && c.type !== 'landing' && c.type !== 'belt') {
+    if (c?.type === 'roost') {
+      showRoostDiagnostics(c.port, e.clientX, e.clientY);
+    } else if (c && c.type !== 'landing' && c.type !== 'belt') {
+      roostPop.style.display = 'none';
       openMachineInspector(cell.col, cell.row);
     } else {
+      roostPop.style.display = 'none';
       hud.closeInspector(); hud.closeFilterPanel(); activeApplianceId = null;
     }
     return;
@@ -431,11 +438,13 @@ requestAnimationFrame(frame);
 
 hud.log('pigeon-isp', 'welcome to the loft. paint belts (2), rotate with R, route the pigeons.');
 
-// ---- views (factory / speedtest / health) -------------------------------------
+// ---- views (factory / hosts / speedtest / health) -----------------------------
 
 new Speedtest();
 const healthView = new Health();
+const hostsView = new Hosts();
 const viewPanels: Record<string, HTMLElement | null> = {
+  hosts: document.getElementById('hosts'),
   speedtest: document.getElementById('speedtest'),
   health: document.getElementById('health'),
 };
@@ -447,7 +456,44 @@ document.querySelectorAll<HTMLButtonElement>('#views button').forEach((btn) => {
     for (const [name, panel] of Object.entries(viewPanels)) {
       if (panel) panel.style.display = name === view ? 'block' : 'none';
     }
-    if (view === 'health') healthView.show();
-    else healthView.hide();
+    if (view === 'health') healthView.show(); else healthView.hide();
+    if (view === 'hosts') hostsView.show(); else hostsView.hide();
   });
 });
+
+// ---- roost diagnostics: click a host's roost in the Factory view --------------
+
+const roostPop = document.getElementById('roost-pop')!;
+let latestStats: LoftStats | null = null;
+
+function showRoostDiagnostics(port: PortInfo, clientX: number, clientY: number): void {
+  const s = latestStats?.ports?.[port.pod];
+  const drops = s ? s.drops.overflow + s.drops.ttl + s.drops.consumer : 0;
+  roostPop.style.display = 'block';
+  roostPop.style.left = Math.min(clientX, window.innerWidth - 280) + 'px';
+  roostPop.style.top = Math.min(clientY, window.innerHeight - 240) + 'px';
+  roostPop.innerHTML = `
+    <h3>▲ ${esc(port.pod)}</h3>
+    <table>
+      <tr><td>ip</td><td>${esc(port.ip)}</td></tr>
+      <tr><td>mac</td><td>${esc(port.mac)}</td></tr>
+      <tr><td>node</td><td>${esc(port.node ?? '?')}</td></tr>
+      <tr><td>ns</td><td>${esc(port.namespace)}</td></tr>
+      <tr><td>rx</td><td>${s ? s.rxFrames + ' frames' : '—'}</td></tr>
+      <tr><td>tx</td><td>${s ? s.txFrames + ' frames' : '—'}</td></tr>
+      <tr><td>drops</td><td>${drops}</td></tr>
+    </table>
+    <div class="row">
+      <button id="rp-shell">shell</button>
+      <button id="rp-close">close</button>
+    </div>`;
+  roostPop.querySelector('#rp-shell')!.addEventListener('click', () => {
+    new PodTerminal(port.pod, port.namespace || 'aviary');
+    roostPop.style.display = 'none';
+  });
+  roostPop.querySelector('#rp-close')!.addEventListener('click', () => { roostPop.style.display = 'none'; });
+}
+
+function esc(s: string): string {
+  return (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
