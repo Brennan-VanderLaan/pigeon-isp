@@ -77,11 +77,14 @@ spec:
     - host: pigeon.localhost
       http:
         paths:
+          # Prefix, not Exact: traefik prioritizes routes by rule string
+          # length, and PathPrefix(`/`) (15 chars) outranks Path(`/ws`)
+          # (12 chars). PathPrefix(`/ws`) (16) wins as it must.
           - path: /ws
-            pathType: Exact
+            pathType: Prefix
             backend:
               service:
-                name: loft
+                name: loft-gateway
                 port:
                   number: 9777
           - path: /

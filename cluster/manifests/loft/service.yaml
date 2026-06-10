@@ -1,16 +1,28 @@
-# loftd runs hostNetwork on every node, but only the worker hosts aviary pods.
-# internalTrafficPolicy Local means Traefik (also on the worker) always lands
-# on the worker's loft, not the control plane's empty one.
+# The consumer endpoint must be THE GATEWAY loft (cluster-wide port view),
+# never an edge. Traefik routes straight to endpoint IPs and ignores
+# internalTrafficPolicy, so a selector Service over the DaemonSet would
+# round-robin /ws across all lofts. Selectorless Service + manual Endpoints
+# pins it to the control-plane node (fixed at 10.5.0.2 in the talos docker
+# provisioner, same constant as LOFT_GATEWAY in the DaemonSet).
 apiVersion: v1
 kind: Service
 metadata:
-  name: loft
+  name: loft-gateway
   namespace: pigeon-system
 spec:
-  selector:
-    app: loft
-  internalTrafficPolicy: Local
   ports:
     - name: ws
       port: 9777
       targetPort: 9777
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: loft-gateway
+  namespace: pigeon-system
+subsets:
+  - addresses:
+      - ip: 10.5.0.2
+    ports:
+      - name: ws
+        port: 9777
