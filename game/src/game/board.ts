@@ -17,6 +17,7 @@ import {
   type MeterMode, type MeterState, type SwitchState,
 } from './machines';
 import { defaultMidiCfg, type MidiCfg } from './midi';
+import { newNamedTable, type KeyField, type NamedTable } from './tables';
 import type { Decoded } from '../net/decode';
 import type { Emission } from './pigeons';
 
@@ -42,6 +43,9 @@ export type Cell =
   | { type: 'hub'; count: number; mesh: THREE.Group }
   | { type: 'meter'; state: MeterState; defaultDir: number; overflowDir: number; mesh: THREE.Group }
   | { type: 'midi'; dir: number; cfg: MidiCfg; lastFireMs: number; fired: number; lastNotes: number[]; mesh: THREE.Group }
+  // Router primitives over named tables (build-your-own switch).
+  | { type: 'learn'; dir: number; table: string; keyField: KeyField; writes: number; mesh: THREE.Group }
+  | { type: 'lookup'; dir: number; missDir: number; table: string; keyField: KeyField; hits: number; misses: number; mesh: THREE.Group }
   // Multi-cell appliance: a body cell (solid), a port INPUT cell (frames
   // enter here), or a port OUTPUT cell (frames leave here). Belts are
   // one-way, so a port is two lanes — exactly like tx/rx wires on a real
@@ -133,8 +137,19 @@ export class Board {
   private slotByIdent = new Map<string, number>(); // "ns/pod" -> slot index (persisted)
   private appliances = new Map<number, Appliance>();
   private nextApplianceId = 1;
+  private tables = new Map<string, NamedTable>(); // shared router state for primitives
   readonly group = new THREE.Group();
   onChange: () => void = () => {};
+
+  /** Get (or create) a named table — Learn/Lookup machines share these. */
+  getTable(name: string): NamedTable {
+    let t = this.tables.get(name);
+    if (!t) { t = newNamedTable(name); this.tables.set(name, t); }
+    return t;
+  }
+  tableNames(): string[] {
+    return [...this.tables.keys()];
+  }
 
   constructor(scene: THREE.Scene) {
     scene.add(this.group);
@@ -260,6 +275,54 @@ export class Board {
     const c = this.cells.get(key(col, row));
     if (c?.type !== 'midi') return;
     c.cfg = cfg;
+    this.onChange();
+  }
+
+  setLearn(col: number, row: number, dir: number, table = 'mac0', keyField: KeyField = 'eth.src'): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    this.getTable(table);
+    const mesh = makePrimMesh(dir, 0x6fdc8c, 'L');
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'learn', dir, table, keyField, writes: 0, mesh });
+    this.onChange();
+  }
+
+  setLookup(col: number, row: number, dir: number, missDir: number, table = 'mac0', keyField: KeyField = 'eth.dst'): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    this.getTable(table);
+    const mesh = makePrimMesh(dir, 0xb98aff, '?', missDir);
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'lookup', dir, missDir, table, keyField, hits: 0, misses: 0, mesh });
+    this.onChange();
+  }
+
+  configureLearn(col: number, row: number, table: string, keyField: KeyField): void {
+    const c = this.cells.get(key(col, row));
+    if (c?.type !== 'learn') return;
+    c.table = table; c.keyField = keyField;
+    this.getTable(table);
+    this.onChange();
+  }
+
+  configureLookup(col: number, row: number, table: string, keyField: KeyField, missDir: number): void {
+    const c = this.cells.get(key(col, row));
+    if (c?.type !== 'lookup') return;
+    c.table = table; c.keyField = keyField;
+    if (c.missDir !== missDir) {
+      c.missDir = missDir;
+      this.group.remove(c.mesh);
+      c.mesh = makePrimMesh(c.dir, 0xb98aff, '?', missDir);
+      c.mesh.position.copy(this.cellToWorld(col, row, 0.04));
+      c.mesh.userData.boardCell = { col, row };
+      this.group.add(c.mesh);
+    }
+    this.getTable(table);
     this.onChange();
   }
 
@@ -490,6 +553,7 @@ export class Board {
 
   private static isMachine(t: string): boolean {
     return t === 'belt' || t === 'filter' || t === 'hub' || t === 'meter' || t === 'midi' ||
+      t === 'learn' || t === 'lookup' ||
       t === 'appliance-body' || t === 'appliance-port-in' ||
       t === 'appliance-port-out' || t === 'appliance-pending';
   }
@@ -516,7 +580,8 @@ export class Board {
   machineMeshes(): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
     for (const c of this.cells.values()) {
-      if (c.type === 'filter' || c.type === 'hub' || c.type === 'meter' || c.type === 'midi') out.push(c.mesh);
+      if (c.type === 'filter' || c.type === 'hub' || c.type === 'meter' || c.type === 'midi' ||
+          c.type === 'learn' || c.type === 'lookup') out.push(c.mesh);
     }
     for (const app of this.appliances.values()) out.push(app.group);
     return out;
@@ -533,6 +598,11 @@ export class Board {
         setBadge(c.mesh, `${c.count}`, '#8a93a0');
       } else if (c.type === 'midi') {
         setBadge(c.mesh, `♪ ${c.fired}`, '#c792ea');
+      } else if (c.type === 'learn') {
+        const t = this.tables.get(c.table);
+        setBadge(c.mesh, `${c.table}:${t ? t.entries.size : 0}`, '#6fdc8c');
+      } else if (c.type === 'lookup') {
+        setBadge(c.mesh, `${c.hits}/${c.hits + c.misses}`, c.misses > c.hits ? '#ffb347' : '#b98aff');
       }
     }
     for (const app of this.appliances.values()) {
@@ -613,6 +683,8 @@ export class Board {
         items.push({ t: 'm', col, row, dd: c.defaultDir, od: c.overflowDir, lim: c.state.limit, mode: c.state.mode });
       }
       if (c.type === 'midi') items.push({ t: 'M', col, row, dir: c.dir, cfg: c.cfg });
+      if (c.type === 'learn') items.push({ t: 'L', col, row, dir: c.dir, tbl: c.table, kf: c.keyField });
+      if (c.type === 'lookup') items.push({ t: 'K', col, row, dir: c.dir, md: c.missDir, tbl: c.table, kf: c.keyField });
     }
     for (const app of this.appliances.values()) {
       const cells = [...app.cells].map((k) => k.split(',').map(Number));
@@ -642,6 +714,8 @@ export class Board {
         // multi-port appliances.
         if (it.t === 'm') this.setMeter(it.col, it.row, it.dd, it.od, it.lim ?? it.th ?? 100, it.mode ?? 'pps');
         if (it.t === 'M') this.setMidi(it.col, it.row, it.dir, it.cfg);
+        if (it.t === 'L') this.setLearn(it.col, it.row, it.dir, it.tbl, it.kf);
+        if (it.t === 'K') this.setLookup(it.col, it.row, it.dir, it.md, it.tbl, it.kf);
         if (it.t === 'A') {
           const cols = it.cells.map((c: number[]) => c[0]);
           const rows = it.cells.map((c: number[]) => c[1]);
@@ -671,9 +745,12 @@ export class Board {
   }
 
   clearFloor(): void {
+    // Every machine type (belts, filters, hubs, meters, MIDI, learn/lookup,
+    // and whole appliances) — not just belts/filters. removeMachine handles
+    // appliance teardown when any of its cells is hit.
     const toRemove: [number, number][] = [];
     for (const [k, c] of this.cells) {
-      if (c.type === 'belt' || c.type === 'filter') {
+      if (Board.isMachine(c.type)) {
         const [col, row] = k.split(',').map(Number);
         toRemove.push([col, row]);
       }
@@ -812,8 +889,36 @@ function makeMidiMesh(dir: number): THREE.Group {
   return g;
 }
 
+/** Learn / Lookup primitive mesh: a small labeled block with a pass-through
+ *  arrow, plus a second (orange) arrow for Lookup's miss exit. */
+function makePrimMesh(dir: number, color: number, glyph: string, missDir?: number): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.8 })));
+  const block = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.24, 0.5),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.25, roughness: 0.6 }),
+  );
+  block.position.y = 0.16;
+  g.add(block);
+  g.add(makeTinyLabel(glyph));
+  g.children[g.children.length - 1].position.y = 0.4;
+  g.add(exitArrow(dir, new THREE.MeshStandardMaterial({ color: 0xcfd8e3 })));
+  if (missDir !== undefined && missDir !== dir) {
+    g.add(exitArrow(missDir, new THREE.MeshStandardMaterial({ color: 0xffb347 })));
+  }
+  return g;
+}
+
 export function makeGhostHub(): THREE.Group {
   return ghostify(makeHubMesh());
+}
+
+export function makeGhostLearn(): THREE.Group {
+  return ghostify(makePrimMesh(0, 0x6fdc8c, 'L'));
+}
+
+export function makeGhostLookup(): THREE.Group {
+  return ghostify(makePrimMesh(0, 0xb98aff, '?', 1));
 }
 
 export function makeGhostMeter(): THREE.Group {

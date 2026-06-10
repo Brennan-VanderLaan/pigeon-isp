@@ -9,9 +9,10 @@
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
 import * as THREE from 'three';
-import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
+import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostLearn, makeGhostLookup, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
 import { fdbRows } from './game/machines';
 import { midi, triggerMidi } from './game/midi';
+import { tableRows } from './game/tables';
 import { decodeFrame } from './net/decode';
 import { sampleFrame } from './game/filters';
 import { PigeonManager, setSpeed } from './game/pigeons';
@@ -194,6 +195,8 @@ const ghosts: Record<string, THREE.Group> = {
   hub: makeGhostHub(),
   meter: makeGhostMeter(),
   midi: makeGhostMidi(),
+  learn: makeGhostLearn(),
+  lookup: makeGhostLookup(),
 };
 for (const g of Object.values(ghosts)) {
   g.visible = false;
@@ -267,6 +270,30 @@ function openMachineInspector(col: number, row: number): void {
       const c = board.cellAt(col, row);
       return c?.type === 'hub' ? c.count : null;
     });
+  } else if (cell.type === 'learn') {
+    activeApplianceId = null;
+    hud.openTablePanel('learn',
+      { table: cell.table, keyField: cell.keyField, missDir: 0 },
+      () => board.tableNames(),
+      (table, kf) => board.configureLearn(col, row, table, kf),
+      () => {
+        const c = board.cellAt(col, row);
+        if (c?.type !== 'learn') return null;
+        return { rows: tableRows(board.getTable(c.table), performance.now()), writes: c.writes };
+      },
+    );
+  } else if (cell.type === 'lookup') {
+    activeApplianceId = null;
+    hud.openTablePanel('lookup',
+      { table: cell.table, keyField: cell.keyField, missDir: cell.missDir },
+      () => board.tableNames(),
+      (table, kf, miss) => board.configureLookup(col, row, table, kf, miss),
+      () => {
+        const c = board.cellAt(col, row);
+        if (c?.type !== 'lookup') return null;
+        return { rows: tableRows(board.getTable(c.table), performance.now()), hits: c.hits, misses: c.misses };
+      },
+    );
   } else if (cell.type === 'midi') {
     activeApplianceId = null;
     // Test plays a sample frame through the live config.
@@ -292,6 +319,8 @@ function paintAtPointer(): void {
   if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
   if (tool === 'hub' && painting) board.setHub(cell.col, cell.row);
   if (tool === 'midi' && painting) board.setMidi(cell.col, cell.row, buildDir);
+  if (tool === 'learn' && painting) board.setLearn(cell.col, cell.row, buildDir);
+  if (tool === 'lookup' && painting) board.setLookup(cell.col, cell.row, buildDir, (buildDir + ejectSide + 4) % 4);
   if (tool === 'erase' && erasing) board.eraseMachine(cell.col, cell.row);
 }
 
@@ -385,7 +414,7 @@ window.addEventListener('pointerdown', (e) => {
     if (cell) { switchDragStart = cell; switchDragEnd = cell; }
     return;
   }
-  painting = tool === 'belt' || tool === 'hub' || tool === 'midi';
+  painting = tool === 'belt' || tool === 'hub' || tool === 'midi' || tool === 'learn' || tool === 'lookup';
   erasing = tool === 'erase';
   paintAtPointer();
 });
@@ -415,7 +444,9 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '5') hud.setTool('switch');
   if (e.key === '6') hud.setTool('meter');
   if (e.key === '7') hud.setTool('midi');
-  if (e.key === '8') hud.setTool('erase');
+  if (e.key === '8') hud.setTool('learn');
+  if (e.key === '9') hud.setTool('lookup');
+  if (e.key === '0') hud.setTool('erase');
   if (e.key === 'r' || e.key === 'R') {
     buildDir = (buildDir + 1) % 4;
     const ghost = activeGhost();

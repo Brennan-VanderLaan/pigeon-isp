@@ -5,10 +5,11 @@ import {
   type FilterConfig, type FilterStats,
 } from '../game/filters';
 import { CHORDS, FRAME_SOURCES, SCALES, noteName, type MidiCfg } from '../game/midi';
+import { KEY_FIELDS, type KeyField } from '../game/tables';
 import { hexDump, type Decoded } from '../net/decode';
 import type { FrameToken } from '../types';
 
-export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'erase';
+export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'learn' | 'lookup' | 'erase';
 
 export interface FilterPanelState {
   config: FilterConfig;
@@ -488,6 +489,57 @@ export class Hud {
   }
 
   midiTest?: () => void;
+
+  /** Learn / Lookup primitive config + live named-table view. */
+  openTablePanel(
+    kind: 'learn' | 'lookup',
+    state: { table: string; keyField: KeyField; missDir: number },
+    tableNames: () => string[],
+    onApply: (table: string, keyField: KeyField, missDir: number) => void,
+    live: () => { rows: { key: string; dir: number; ageS: number; hits: number }[]; writes?: number; hits?: number; misses?: number } | null,
+  ): void {
+    this.closeFilterPanel();
+    this.filterPanel.style.display = 'block';
+    const kfOpts = KEY_FIELDS.map((f) => `<option value="${f.id}" ${f.id === state.keyField ? 'selected' : ''}>${f.label}</option>`).join('');
+    const dirOpts = (sel: number) => DIR_NAMES.map((n, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${n}</option>`).join('');
+    const render = () => {
+      const lv = live();
+      const tbls = new Set([...tableNames(), state.table]);
+      const tblOpts = [...tbls].map((t) => `<option value="${t}" ${t === state.table ? 'selected' : ''}>${esc(t)}</option>`).join('');
+      const rows = (lv?.rows ?? [])
+        .map((r) => `<tr><td>${esc(r.key)}</td><td>${DIR_ARROWS[r.dir]} ${DIR_NAMES[r.dir]}</td><td>${r.ageS}s</td><td>${r.hits}</td></tr>`).join('');
+      const counter = kind === 'learn'
+        ? `wrote ${lv?.writes ?? 0} entries`
+        : `hits ${lv?.hits ?? 0} · misses ${lv?.misses ?? 0}`;
+      this.filterPanel.innerHTML = `
+        <h3>${kind === 'learn' ? '✎ Learn' : '🔍 Lookup'} — ${kind === 'learn' ? 'writes' : 'reads'} a named table</h3>
+        <div class="hint2">${kind === 'learn'
+          ? 'records key → the direction the frame came from, then passes it through. Point src-MAC at it and it learns where each host lives.'
+          : 'reads key → stored direction (hit routes there); a miss takes the orange exit. Wire the miss exit to a hub to flood, and you have built a switch.'}</div>
+        <div class="row">
+          <label style="margin:0">table</label>
+          <input list="fc-tbls" id="tb-name" value="${esc(state.table)}" style="width:90px">
+          <datalist id="fc-tbls">${tblOpts}</datalist>
+          <label style="margin:0">key</label><select id="tb-kf" style="width:auto">${kfOpts}</select>
+          ${kind === 'lookup' ? `<label style="margin:0">miss →</label><select id="tb-miss" style="width:auto">${dirOpts(state.missDir)}</select>` : ''}
+        </div>
+        <div class="row"><button id="tb-apply">Apply</button><button id="fc-close">Close</button><span class="err" id="tb-ok"></span></div>
+        <label style="margin-top:8px">table <b>${esc(state.table)}</b> — ${counter}</label>
+        <table class="grid"><tr><th>key</th><th>dir</th><th>age</th><th>hits</th></tr>${rows}</table>
+        ${rows ? '' : '<div class="hint2">empty — no entries yet</div>'}`;
+      const q = <T extends HTMLElement>(s: string) => this.filterPanel.querySelector<T>(s)!;
+      q('#tb-apply').addEventListener('click', () => {
+        state.table = q<HTMLInputElement>('#tb-name').value.trim() || 'mac0';
+        state.keyField = q<HTMLSelectElement>('#tb-kf').value as KeyField;
+        state.missDir = kind === 'lookup' ? Number(q<HTMLSelectElement>('#tb-miss').value) : state.missDir;
+        onApply(state.table, state.keyField, state.missDir);
+        q('#tb-ok').textContent = '✓ set';
+      });
+      q('#fc-close').addEventListener('click', () => this.closeFilterPanel());
+    };
+    render();
+    this.filterTimer = window.setInterval(render, 800);
+  }
 
   openHubPanel(live: () => number | null): void {
     this.closeFilterPanel();

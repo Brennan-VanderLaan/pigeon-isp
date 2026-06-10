@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { Board, DIRS, COLS, ROWS } from './board';
 import { hubExits, meterStep } from './machines';
 import { midi, triggerMidi } from './midi';
+import { tableKey, tableLearn, tableLookup } from './tables';
 import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
 import type { Bridge, FrameToken } from '../types';
 
@@ -181,6 +182,23 @@ export class Pigeon {
           cell.lastNotes = triggerMidi(cell.cfg, this.decoded, this.token.snapshot);
         }
         return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+      }
+      case 'learn': {
+        // Write key -> the direction this frame CAME FROM, then pass through.
+        const k = tableKey(cell.keyField, this.decoded);
+        if (k !== null) {
+          tableLearn(board.getTable(cell.table), k, (this.travelDir + 2) % 4, performance.now());
+          cell.writes++;
+        }
+        return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+      }
+      case 'lookup': {
+        // Read key -> stored direction; hit routes there, miss takes missDir.
+        const k = tableKey(cell.keyField, this.decoded);
+        const dir = k !== null ? tableLookup(board.getTable(cell.table), k, performance.now()) : null;
+        if (dir !== null) { cell.hits++; return { kind: 'emit', emissions: [{ col, row, dir }] }; }
+        cell.misses++;
+        return { kind: 'emit', emissions: [{ col, row, dir: cell.missDir }] };
       }
       case 'appliance-port-in': {
         // A frame entered this port's IN lane — the switch routes it (802.1D),
