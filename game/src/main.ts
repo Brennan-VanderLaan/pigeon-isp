@@ -210,8 +210,8 @@ function openFilterEditor(col: number, row: number): void {
   const cell = board.cellAt(col, row);
   if (cell?.type !== 'filter') return;
   hud.openFilterPanel(
-    { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, error: cell.compiled.error },
-    (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side),
+    { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, dir: cell.dir, error: cell.compiled.error },
+    (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side, s.dir),
     () => {
       const c = board.cellAt(col, row);
       return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;

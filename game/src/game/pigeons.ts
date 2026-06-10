@@ -10,6 +10,7 @@
 // thousands of spawns per second don't churn the GC.
 import * as THREE from 'three';
 import { Board, DIRS, COLS, ROWS } from './board';
+import { filterExit } from './filters';
 import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
 import type { Bridge, FrameToken } from '../types';
 
@@ -114,16 +115,20 @@ export class Pigeon {
         return cell.dir;
       case 'filter': {
         const matched = cell.compiled.match(this.decoded);
+        const exit = filterExit(cell.dir, cell.side, cell.matchToSide, matched);
         // Score the machine: the editor shows live verdicts (ring buffer,
-        // cheap enough to run at 5000x).
+        // cheap enough to run at 5000x). `ejected` records the PHYSICAL
+        // exit, not the match result — displays must never lie about
+        // geometry.
         const st = cell.stats;
         if (matched) st.hits++;
         else st.misses++;
-        st.recent[st.ptr % st.recent.length] = { summary: this.decoded.summary, matched };
+        st.recent[st.ptr % st.recent.length] = {
+          summary: this.decoded.summary, matched, ejected: exit !== cell.dir,
+        };
         st.ptr++;
         cell.lastFrame = this.token.snapshot;
-        const ejected = cell.matchToSide ? matched : !matched;
-        return ejected ? (cell.dir + cell.side + 4) % 4 : cell.dir;
+        return exit;
       }
       case 'roost':
         return cell.facing;

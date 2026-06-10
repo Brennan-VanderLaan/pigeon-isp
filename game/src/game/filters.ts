@@ -73,11 +73,38 @@ export const KIND_OPTIONS = [
   'tcp', 'udp', 'other',
 ];
 
+/** Where does a frame physically exit a filter machine? Pure function — the
+ *  single source of truth for filter routing, used by the simulation, the
+ *  editor preview, and the tests. */
+export function filterExit(dir: number, side: 1 | -1, matchToSide: boolean, matched: boolean): number {
+  const ejected = matchToSide ? matched : !matched;
+  return ejected ? (dir + side + 4) % 4 : dir;
+}
+
+export const DIR_NAMES = ['east', 'south', 'west', 'north'];
+
+/** Human sentence stating BOTH physical paths with absolute compass
+ *  directions — no more guessing which way anything goes. A filter's
+ *  "straight" is ITS OWN facing, not the belt's flow; saying "east" out
+ *  loud is what catches a machine placed sideways. */
+export function routingSummary(cfg: FilterConfig, matchToSide: boolean, side: 1 | -1, dir?: number): string {
+  const what =
+    cfg.field === 'broadcast' ? 'broadcast' :
+    cfg.field === 'custom' ? 'expr=true' :
+    `${cfg.field}~“${cfg.value}”`;
+  const sideName = side === 1 ? 'right' : 'left';
+  const straightAbs = dir !== undefined ? ` (${DIR_NAMES[dir]})` : '';
+  const sideAbs = dir !== undefined ? ` (${DIR_NAMES[(dir + side + 4) % 4]})` : '';
+  return matchToSide
+    ? `${what} → eject ${sideName}${sideAbs} · everything else → straight${straightAbs}`
+    : `${what} → straight${straightAbs} · everything else → eject ${sideName}${sideAbs}`;
+}
+
 /** Per-filter runtime telemetry: what did this machine actually decide? */
 export interface FilterStats {
   hits: number;
   misses: number;
-  recent: ({ summary: string; matched: boolean } | undefined)[];
+  recent: ({ summary: string; matched: boolean; ejected: boolean } | undefined)[];
   ptr: number;
 }
 

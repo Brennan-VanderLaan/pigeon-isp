@@ -120,7 +120,7 @@ export class Board {
     const mesh = makeFilterMesh(dir, side);
     mesh.position.copy(this.cellToWorld(col, row, 0.04));
     mesh.userData.boardCell = { col, row };
-    attachRuleLabel(mesh, cfg);
+    attachRuleLabel(mesh, cfg, matchToSide);
     this.group.add(mesh);
     this.cells.set(key(col, row), {
       type: 'filter', dir, side, matchToSide, config: cfg, compiled: compileFilter(cfg), mesh,
@@ -130,20 +130,22 @@ export class Board {
   }
 
   /** Update a filter's config in place (from the config panel). */
-  configureFilter(col: number, row: number, config: FilterConfig, matchToSide: boolean, side: 1 | -1): string | undefined {
+  configureFilter(col: number, row: number, config: FilterConfig, matchToSide: boolean, side: 1 | -1, dir?: number): string | undefined {
     const c = this.cells.get(key(col, row));
     if (c?.type !== 'filter') return;
     c.config = config;
     c.matchToSide = matchToSide;
-    if (c.side !== side) {
+    const newDir = dir ?? c.dir;
+    if (c.side !== side || c.dir !== newDir) {
       c.side = side;
+      c.dir = newDir;
       this.group.remove(c.mesh);
-      c.mesh = makeFilterMesh(c.dir, side);
+      c.mesh = makeFilterMesh(newDir, side);
       c.mesh.position.copy(this.cellToWorld(col, row, 0.04));
       c.mesh.userData.boardCell = { col, row };
       this.group.add(c.mesh);
     }
-    attachRuleLabel(c.mesh, config);
+    attachRuleLabel(c.mesh, config, matchToSide);
     c.compiled = compileFilter(config);
     c.stats = newFilterStats(); // new rule, fresh score
     this.onChange();
@@ -343,7 +345,7 @@ export function orientGhost(g: THREE.Group, dir: number): void {
 
 // Every filter wears its rule on the floor — an unprogrammed default in a
 // chain should be impossible to miss.
-function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig): void {
+function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig, matchToSide = true): void {
   const old = mesh.userData.ruleLabel as THREE.Sprite | undefined;
   if (old) mesh.remove(old);
   const canvas = document.createElement('canvas');
@@ -356,7 +358,8 @@ function attachRuleLabel(mesh: THREE.Group, cfg: FilterConfig): void {
   ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
   ctx.font = '30px Consolas, monospace';
   ctx.fillStyle = '#b98aff';
-  ctx.fillText(describeFilter(cfg).slice(0, 24), 12, 42);
+  // ⤴ = matching frames eject; ⬆ = matching frames go straight.
+  ctx.fillText(`${matchToSide ? '⤴' : '⬆'} ${describeFilter(cfg)}`.slice(0, 24), 12, 42);
   const tex = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
   sprite.scale.set(1.7, 0.28, 1);
