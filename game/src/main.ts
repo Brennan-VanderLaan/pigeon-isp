@@ -317,7 +317,10 @@ window.addEventListener('pointermove', (e) => {
 
 window.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
-  if ((e.target as HTMLElement).closest('.panel')) return;
+  // Clicks inside any UI chrome (panels, the roost popover, terminal windows,
+  // the taskbar) must not also drive the board — this is what swallowed the
+  // roost "shell" button before.
+  if ((e.target as HTMLElement).closest('.panel, #roost-pop, .term-win, #term-taskbar, .fullpanel, #views')) return;
   world.setPointer(e.clientX, e.clientY);
 
   if (tool === 'select') {

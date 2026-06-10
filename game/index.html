@@ -177,25 +177,37 @@
   </div>
   <div id="filtercfg" class="panel" style="display:none; bottom: 64px; right: 10px; width: 580px;"></div>
   <style>
-    /* Live pod terminal (xterm) */
-    .term-overlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
-      display: flex; align-items: center; justify-content: center; z-index: 20;
+    /* Desktop-style pod terminal windows */
+    .term-win {
+      position: fixed; background: #0b0e13; border: 1px solid var(--edge);
+      border-radius: 9px; overflow: hidden; display: flex; flex-direction: column;
+      box-shadow: 0 12px 48px rgba(0,0,0,0.6); min-width: 320px; min-height: 200px;
     }
-    .term-window {
-      width: 80vw; max-width: 1000px; height: 70vh; background: #0b0e13;
-      border: 1px solid var(--edge); border-radius: 10px; overflow: hidden;
-      display: flex; flex-direction: column; box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+    .tw-bar {
+      display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+      background: #131a26; border-bottom: 1px solid var(--edge); cursor: move; user-select: none;
     }
-    .term-bar {
-      display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-      background: #131a26; border-bottom: 1px solid var(--edge);
+    .tw-title { color: var(--accent); font-weight: bold; font-size: 12px; }
+    .tw-status { color: var(--dim); font-size: 11px; }
+    .tw-spacer { flex: 1; }
+    .tw-btn {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 5px; cursor: pointer; width: 24px; height: 22px; line-height: 1; padding: 0;
     }
-    .term-title { color: var(--accent); font-weight: bold; }
-    .term-status { color: var(--dim); margin-left: auto; }
-    .term-status.live { color: var(--good); }
-    .term-close { background: #1a2230; color: var(--text); border: 1px solid var(--edge); border-radius: 6px; cursor: pointer; padding: 2px 10px; }
-    .term-body { flex: 1; padding: 6px 8px; overflow: hidden; }
+    .tw-body { flex: 1; padding: 6px 8px; overflow: hidden; }
+    .tw-grip {
+      position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize;
+      background: linear-gradient(135deg, transparent 50%, var(--edge) 50%, var(--edge) 60%, transparent 60%, transparent 75%, var(--edge) 75%);
+    }
+    #term-taskbar {
+      position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+      display: none; gap: 6px; z-index: 40; background: var(--panel);
+      border: 1px solid var(--edge); border-radius: 8px; padding: 5px 6px;
+    }
+    .term-chip {
+      background: #1a2230; color: var(--accent); border: 1px solid var(--edge);
+      border-radius: 6px; cursor: pointer; padding: 4px 12px; font: inherit; font-size: 12px;
+    }
 
     /* roost diagnostics popover */
     #roost-pop {
