@@ -8,8 +8,8 @@
 //                   MAC-learning software switch and delivers every token
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
-import { Board, makeGhostBelt, orientGhost } from './game/board';
-import { PigeonManager } from './game/pigeons';
+import { Board, makeGhostBelt, makeGhostFilter, orientGhost } from './game/board';
+import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
 import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
@@ -171,37 +171,61 @@ if (forceSim) {
 // ---- input ------------------------------------------------------------------
 
 let tool: Tool = 'belt';
-let beltDir = 0;
+let buildDir = 0;
+let ejectSide: 1 | -1 = 1;
 let painting = false;
 let erasing = false;
-const ghost = makeGhostBelt();
-ghost.visible = false;
-world.scene.add(ghost);
+
+const beltGhost = makeGhostBelt();
+const filterGhost = makeGhostFilter();
+beltGhost.visible = false;
+filterGhost.visible = false;
+world.scene.add(beltGhost);
+world.scene.add(filterGhost);
+
+function activeGhost() {
+  return tool === 'belt' ? beltGhost : tool === 'filter' ? filterGhost : null;
+}
 
 hud.onToolChange = (t) => {
   tool = t;
-  ghost.visible = tool === 'belt';
+  beltGhost.visible = false;
+  filterGhost.visible = false;
+  if (t !== 'select') hud.closeFilterPanel();
 };
 hud.setTool('belt');
+
+// The floor persists; rebuild it before traffic arrives.
+const restored = board.restore();
+if (restored > 0) hud.log('pigeon-isp', `floor restored: ${restored} machine(s) from last session`);
+board.onChange = () => board.save();
+
+hud.bindSpeed(setSpeed);
+hud.bindClearFloor(() => {
+  board.clearFloor();
+  hud.log('pigeon-isp', 'floor bulldozed');
+});
 
 function paintAtPointer(): void {
   const hit = world.pickGround();
   if (!hit) return;
   const cell = board.worldToCell(hit);
   if (!cell) return;
-  if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, beltDir);
-  if (tool === 'erase' && erasing) board.eraseBelt(cell.col, cell.row);
+  if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
+  if (tool === 'filter' && painting) board.setFilter(cell.col, cell.row, buildDir, ejectSide);
+  if (tool === 'erase' && erasing) board.eraseMachine(cell.col, cell.row);
 }
 
 window.addEventListener('pointermove', (e) => {
   world.setPointer(e.clientX, e.clientY);
-  const hit = world.pickGround();
-  if (hit && tool === 'belt') {
-    const cell = board.worldToCell(hit);
+  const ghost = activeGhost();
+  if (ghost) {
+    const hit = world.pickGround();
+    const cell = hit ? board.worldToCell(hit) : null;
     if (cell) {
       ghost.visible = true;
       ghost.position.copy(board.cellToWorld(cell.col, cell.row, 0.05));
-      orientGhost(ghost, beltDir);
+      orientGhost(ghost, buildDir);
     } else {
       ghost.visible = false;
     }
@@ -215,18 +239,34 @@ window.addEventListener('pointerdown', (e) => {
   world.setPointer(e.clientX, e.clientY);
 
   if (tool === 'select') {
+    // Pigeons first, then filter machines.
     const hit = world.pickObjects(pigeons.pickablesByMesh());
     let obj = hit?.object ?? null;
     while (obj && !obj.userData.pigeon) obj = obj.parent;
     if (obj?.userData.pigeon) {
       const p = obj.userData.pigeon;
       hud.inspect(p.decoded, p.token);
-    } else {
-      hud.closeInspector();
+      return;
     }
+    const fhit = world.pickObjects(board.filterMeshes());
+    let fobj = fhit?.object ?? null;
+    while (fobj && !fobj.userData.boardCell) fobj = fobj.parent;
+    if (fobj?.userData.boardCell) {
+      const { col, row } = fobj.userData.boardCell;
+      const cell = board.cellAt(col, row);
+      if (cell?.type === 'filter') {
+        hud.openFilterPanel(
+          { config: cell.config, matchToSide: cell.matchToSide, side: cell.side, error: cell.compiled.error },
+          (s) => board.configureFilter(col, row, s.config, s.matchToSide, s.side),
+        );
+      }
+      return;
+    }
+    hud.closeInspector();
+    hud.closeFilterPanel();
     return;
   }
-  painting = tool === 'belt';
+  painting = tool === 'belt' || tool === 'filter';
   erasing = tool === 'erase';
   paintAtPointer();
 });
@@ -237,14 +277,24 @@ window.addEventListener('pointerup', () => {
 });
 
 window.addEventListener('keydown', (e) => {
+  if ((e.target as HTMLElement).matches('input, textarea, select')) return;
   if (e.key === '1') hud.setTool('select');
   if (e.key === '2') hud.setTool('belt');
-  if (e.key === '3') hud.setTool('erase');
+  if (e.key === '3') hud.setTool('filter');
+  if (e.key === '4') hud.setTool('erase');
   if (e.key === 'r' || e.key === 'R') {
-    beltDir = (beltDir + 1) % 4;
-    orientGhost(ghost, beltDir);
+    buildDir = (buildDir + 1) % 4;
+    const ghost = activeGhost();
+    if (ghost) orientGhost(ghost, buildDir);
   }
-  if (e.key === 'Escape') hud.closeInspector();
+  if (e.key === 'e' || e.key === 'E') {
+    ejectSide = ejectSide === 1 ? -1 : 1;
+    hud.log('pigeon-isp', `filter eject side: ${ejectSide === 1 ? 'right' : 'left'}`);
+  }
+  if (e.key === 'Escape') {
+    hud.closeInspector();
+    hud.closeFilterPanel();
+  }
 });
 
 // ---- loop -------------------------------------------------------------------

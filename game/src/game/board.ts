@@ -1,8 +1,14 @@
-// The factory floor: a grid of cells. Dovecotes (ports) sit on the perimeter;
-// the player paints directional belts on the interior. Pure data + meshes —
-// pigeons live in pigeons.ts.
+// The factory floor: a grid of cells. Every port (host) gets TWO structures
+// on the perimeter — a ROOST where its outgoing frames spawn, and a LANDING
+// pad where you drop frames bound for it. Separate in/out locations is what
+// makes belt routing tractable (the factorio rule: inputs and outputs never
+// share a tile).
+//
+// Interior cells hold player-built machinery: belts and filter machines.
+// The floor persists to localStorage — your router survives a refresh.
 import * as THREE from 'three';
 import type { PortInfo } from '../types';
+import { compileFilter, type CompiledFilter, type FilterConfig } from './filters';
 
 export const COLS = 24;
 export const ROWS = 14;
@@ -18,23 +24,37 @@ export const DIRS = [
 
 export type Cell =
   | { type: 'belt'; dir: number; mesh: THREE.Group }
-  | { type: 'dovecote'; port: PortInfo; facing: number; mesh: THREE.Group };
+  | {
+      type: 'filter'; dir: number; side: 1 | -1; matchToSide: boolean;
+      config: FilterConfig; compiled: CompiledFilter; mesh: THREE.Group;
+    }
+  | { type: 'roost'; port: PortInfo; facing: number; mesh: THREE.Group }
+  | { type: 'landing'; port: PortInfo; mesh: THREE.Group };
 
-const SLOTS = [
-  { col: 0, row: 7, facing: 0 },
-  { col: COLS - 1, row: 7, facing: 2 },
-  { col: 0, row: 3, facing: 0 },
-  { col: COLS - 1, row: 3, facing: 2 },
-  { col: 0, row: 11, facing: 0 },
-  { col: COLS - 1, row: 11, facing: 2 },
-  { col: 12, row: 0, facing: 1 },
-  { col: 12, row: ROWS - 1, facing: 3 },
+export interface PortLoc {
+  roost: { col: number; row: number };
+  landing: { col: number; row: number };
+  facing: number;
+}
+
+// Roost/landing pairs around the perimeter (roost first, landing beside it).
+const SLOTS: PortLoc[] = [
+  { roost: { col: 0, row: 3 }, landing: { col: 0, row: 5 }, facing: 0 },
+  { roost: { col: COLS - 1, row: 3 }, landing: { col: COLS - 1, row: 5 }, facing: 2 },
+  { roost: { col: 0, row: 9 }, landing: { col: 0, row: 11 }, facing: 0 },
+  { roost: { col: COLS - 1, row: 9 }, landing: { col: COLS - 1, row: 11 }, facing: 2 },
+  { roost: { col: 10, row: 0 }, landing: { col: 12, row: 0 }, facing: 1 },
+  { roost: { col: 10, row: ROWS - 1 }, landing: { col: 12, row: ROWS - 1 }, facing: 3 },
 ];
+
+const STORE_KEY = 'pigeon-isp-floor-v1';
 
 const beltBase = new THREE.BoxGeometry(CELL * 0.94, 0.08, CELL * 0.94);
 const beltBaseMat = new THREE.MeshStandardMaterial({ color: 0x232c3a, roughness: 0.9 });
+const filterBaseMat = new THREE.MeshStandardMaterial({ color: 0x2d2438, roughness: 0.8 });
 const arrowGeo = new THREE.ConeGeometry(0.16, 0.42, 4);
 const arrowMat = new THREE.MeshStandardMaterial({ color: 0xffb347, roughness: 0.6 });
+const sideArrowMat = new THREE.MeshStandardMaterial({ color: 0xb98aff, roughness: 0.6 });
 
 function key(col: number, row: number): string {
   return col + ',' + row;
@@ -42,9 +62,10 @@ function key(col: number, row: number): string {
 
 export class Board {
   cells = new Map<string, Cell>();
-  private dovecotesByPort = new Map<number, { col: number; row: number; facing: number }>();
+  private portLocs = new Map<number, PortLoc>();
   private usedSlots = new Set<number>();
   readonly group = new THREE.Group();
+  onChange: () => void = () => {};
 
   constructor(scene: THREE.Scene) {
     scene.add(this.group);
@@ -58,15 +79,12 @@ export class Board {
 
     const grid = new THREE.GridHelper(Math.max(COLS, ROWS) * CELL, Math.max(COLS, ROWS), 0x2c3442, 0x222a36);
     grid.position.y = 0.01;
-    // GridHelper is square; scale to the board's aspect.
     grid.scale.set(COLS / Math.max(COLS, ROWS), 1, ROWS / Math.max(COLS, ROWS));
     this.group.add(grid);
   }
 
   cellToWorld(col: number, row: number, y = 0): THREE.Vector3 {
-    return new THREE.Vector3(
-      (col - (COLS - 1) / 2) * CELL, y, (row - (ROWS - 1) / 2) * CELL,
-    );
+    return new THREE.Vector3((col - (COLS - 1) / 2) * CELL, y, (row - (ROWS - 1) / 2) * CELL);
   }
 
   worldToCell(p: THREE.Vector3): { col: number; row: number } | null {
@@ -80,78 +98,229 @@ export class Board {
     return this.cells.get(key(col, row));
   }
 
-  // ---- belts ----------------------------------------------------------------
+  // ---- machinery (belts + filters) -------------------------------------------
 
   setBelt(col: number, row: number, dir: number): void {
+    if (!this.clearForBuild(col, row)) return;
     const existing = this.cells.get(key(col, row));
-    if (existing?.type === 'dovecote') return;
-    if (existing?.type === 'belt') {
-      if (existing.dir === dir) return;
-      this.group.remove(existing.mesh);
-    }
+    if (existing?.type === 'belt' && existing.dir === dir) return;
+    this.removeMachine(col, row);
     const mesh = makeBeltMesh(dir);
     mesh.position.copy(this.cellToWorld(col, row, 0.04));
     this.group.add(mesh);
     this.cells.set(key(col, row), { type: 'belt', dir, mesh });
+    this.onChange();
   }
 
-  eraseBelt(col: number, row: number): void {
+  setFilter(col: number, row: number, dir: number, side: 1 | -1, config?: FilterConfig, matchToSide = true): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    const cfg = config ?? { field: 'kind', value: 'arp' };
+    const mesh = makeFilterMesh(dir, side);
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), {
+      type: 'filter', dir, side, matchToSide, config: cfg, compiled: compileFilter(cfg), mesh,
+    });
+    this.onChange();
+  }
+
+  /** Update a filter's config in place (from the config panel). */
+  configureFilter(col: number, row: number, config: FilterConfig, matchToSide: boolean, side: 1 | -1): string | undefined {
+    const c = this.cells.get(key(col, row));
+    if (c?.type !== 'filter') return;
+    c.config = config;
+    c.matchToSide = matchToSide;
+    if (c.side !== side) {
+      c.side = side;
+      this.group.remove(c.mesh);
+      c.mesh = makeFilterMesh(c.dir, side);
+      c.mesh.position.copy(this.cellToWorld(col, row, 0.04));
+      c.mesh.userData.boardCell = { col, row };
+      this.group.add(c.mesh);
+    }
+    c.compiled = compileFilter(config);
+    this.onChange();
+    return c.compiled.error;
+  }
+
+  eraseMachine(col: number, row: number): void {
+    if (this.removeMachine(col, row)) this.onChange();
+  }
+
+  private removeMachine(col: number, row: number): boolean {
     const existing = this.cells.get(key(col, row));
-    if (existing?.type !== 'belt') return;
+    if (existing?.type !== 'belt' && existing?.type !== 'filter') return false;
     this.group.remove(existing.mesh);
     this.cells.delete(key(col, row));
+    return true;
   }
 
-  // ---- dovecotes --------------------------------------------------------------
+  private clearForBuild(col: number, row: number): boolean {
+    const existing = this.cells.get(key(col, row));
+    return existing === undefined || existing.type === 'belt' || existing.type === 'filter';
+  }
+
+  filterMeshes(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [];
+    for (const c of this.cells.values()) {
+      if (c.type === 'filter') out.push(c.mesh);
+    }
+    return out;
+  }
+
+  // ---- ports (roost + landing pairs) -------------------------------------------
 
   addPort(port: PortInfo): void {
-    if (this.dovecotesByPort.has(port.id)) return;
+    if (this.portLocs.has(port.id)) return;
     let slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i));
-    if (slotIdx < 0) slotIdx = 0; // out of slots: stack on the first (unlikely)
+    if (slotIdx < 0) slotIdx = 0;
     this.usedSlots.add(slotIdx);
     const slot = SLOTS[slotIdx];
 
-    const mesh = makeDovecoteMesh(port);
-    mesh.position.copy(this.cellToWorld(slot.col, slot.row, 0));
-    this.group.add(mesh);
-    this.cells.set(key(slot.col, slot.row), { type: 'dovecote', port, facing: slot.facing, mesh });
-    this.dovecotesByPort.set(port.id, { col: slot.col, row: slot.row, facing: slot.facing });
+    // Building over the slot? The host wins; the machine is scrap.
+    this.removeMachine(slot.roost.col, slot.roost.row);
+    this.removeMachine(slot.landing.col, slot.landing.row);
+
+    const roostMesh = makeRoostMesh(port);
+    roostMesh.position.copy(this.cellToWorld(slot.roost.col, slot.roost.row, 0));
+    this.group.add(roostMesh);
+    this.cells.set(key(slot.roost.col, slot.roost.row), { type: 'roost', port, facing: slot.facing, mesh: roostMesh });
+
+    const landingMesh = makeLandingMesh(port);
+    landingMesh.position.copy(this.cellToWorld(slot.landing.col, slot.landing.row, 0));
+    this.group.add(landingMesh);
+    this.cells.set(key(slot.landing.col, slot.landing.row), { type: 'landing', port, mesh: landingMesh });
+
+    this.portLocs.set(port.id, { roost: { ...slot.roost }, landing: { ...slot.landing }, facing: slot.facing });
   }
 
   removePort(id: number): void {
-    const loc = this.dovecotesByPort.get(id);
+    const loc = this.portLocs.get(id);
     if (!loc) return;
-    this.dovecotesByPort.delete(id);
-    const cell = this.cells.get(key(loc.col, loc.row));
-    if (cell?.type === 'dovecote') {
-      this.group.remove(cell.mesh);
-      this.cells.delete(key(loc.col, loc.row));
+    this.portLocs.delete(id);
+    for (const cellLoc of [loc.roost, loc.landing]) {
+      const cell = this.cells.get(key(cellLoc.col, cellLoc.row));
+      if (cell?.type === 'roost' || cell?.type === 'landing') {
+        this.group.remove(cell.mesh);
+        this.cells.delete(key(cellLoc.col, cellLoc.row));
+      }
     }
-    const slotIdx = SLOTS.findIndex((s) => s.col === loc.col && s.row === loc.row);
+    const slotIdx = SLOTS.findIndex((s) => s.roost.col === loc.roost.col && s.roost.row === loc.roost.row);
     if (slotIdx >= 0) this.usedSlots.delete(slotIdx);
   }
 
-  dovecoteFor(portId: number): { col: number; row: number; facing: number } | undefined {
-    return this.dovecotesByPort.get(portId);
+  portLoc(portId: number): PortLoc | undefined {
+    return this.portLocs.get(portId);
   }
+
+  // ---- persistence ----------------------------------------------------------------
+
+  serialize(): string {
+    const items: any[] = [];
+    for (const [k, c] of this.cells) {
+      const [col, row] = k.split(',').map(Number);
+      if (c.type === 'belt') items.push({ t: 'b', col, row, dir: c.dir });
+      if (c.type === 'filter') {
+        items.push({ t: 'f', col, row, dir: c.dir, side: c.side, m: c.matchToSide, cfg: c.config });
+      }
+    }
+    return JSON.stringify(items);
+  }
+
+  save(): void {
+    try {
+      localStorage.setItem(STORE_KEY, this.serialize());
+    } catch { /* storage full/blocked: the floor just won't persist */ }
+  }
+
+  restore(): number {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return 0;
+      const items = JSON.parse(raw) as any[];
+      for (const it of items) {
+        if (it.t === 'b') this.setBelt(it.col, it.row, it.dir);
+        if (it.t === 'f') this.setFilter(it.col, it.row, it.dir, it.side, it.cfg, it.m);
+      }
+      return items.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  clearFloor(): void {
+    const toRemove: [number, number][] = [];
+    for (const [k, c] of this.cells) {
+      if (c.type === 'belt' || c.type === 'filter') {
+        const [col, row] = k.split(',').map(Number);
+        toRemove.push([col, row]);
+      }
+    }
+    for (const [col, row] of toRemove) this.removeMachine(col, row);
+    this.onChange();
+  }
+}
+
+// ---- meshes ------------------------------------------------------------------------
+
+function orient(g: THREE.Group, dir: number): void {
+  const d = DIRS[dir];
+  g.rotation.y = Math.atan2(d.dx, d.dz);
 }
 
 function makeBeltMesh(dir: number): THREE.Group {
   const g = new THREE.Group();
-  const base = new THREE.Mesh(beltBase, beltBaseMat);
-  g.add(base);
+  g.add(new THREE.Mesh(beltBase, beltBaseMat));
   const arrow = new THREE.Mesh(arrowGeo, arrowMat);
   arrow.position.y = 0.09;
-  arrow.rotation.x = Math.PI / 2; // lie flat, point along -z by default... fix below
+  arrow.rotation.x = Math.PI / 2; // cone +y -> +z; group rotation points it along dir
   g.add(arrow);
-  // Cone points +y by default; after rotation.x=PI/2 it points +z (south, dir 1).
-  const d = DIRS[dir];
-  g.rotation.y = Math.atan2(d.dx, d.dz);
+  orient(g, dir);
+  return g;
+}
+
+function makeFilterMesh(dir: number, side: 1 | -1): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, filterBaseMat));
+  const housing = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.3, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0x3a2f4d, roughness: 0.6 }),
+  );
+  housing.position.y = 0.2;
+  g.add(housing);
+  const eye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 8, 6),
+    new THREE.MeshStandardMaterial({ color: 0xb98aff, emissive: 0xb98aff, emissiveIntensity: 0.6 }),
+  );
+  eye.position.y = 0.4;
+  g.add(eye);
+
+  // Straight-through arrow (gray) and eject arrow (purple).
+  const fwd = new THREE.Mesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x8a93a0 }));
+  fwd.position.set(0, 0.09, 0.38);
+  fwd.rotation.x = Math.PI / 2;
+  g.add(fwd);
+  const eject = new THREE.Mesh(arrowGeo, sideArrowMat);
+  eject.position.set(-0.38 * side, 0.09, 0); // local x maps to world per orient(); sign tuned with rotation below
+  eject.rotation.z = (Math.PI / 2) * side;
+  eject.rotation.x = Math.PI / 2;
+  g.add(eject);
+
+  orient(g, dir);
   return g;
 }
 
 export function makeGhostBelt(): THREE.Group {
-  const g = makeBeltMesh(0);
+  return ghostify(makeBeltMesh(0));
+}
+
+export function makeGhostFilter(): THREE.Group {
+  return ghostify(makeFilterMesh(0, 1));
+}
+
+function ghostify(g: THREE.Group): THREE.Group {
   g.traverse((o) => {
     if (o instanceof THREE.Mesh) {
       const m = (o.material as THREE.MeshStandardMaterial).clone();
@@ -164,11 +333,10 @@ export function makeGhostBelt(): THREE.Group {
 }
 
 export function orientGhost(g: THREE.Group, dir: number): void {
-  const d = DIRS[dir];
-  g.rotation.y = Math.atan2(d.dx, d.dz);
+  orient(g, dir);
 }
 
-function makeDovecoteMesh(port: PortInfo): THREE.Group {
+function makeRoostMesh(port: PortInfo): THREE.Group {
   const g = new THREE.Group();
   const tower = new THREE.Mesh(
     new THREE.CylinderGeometry(0.34, 0.4, 1.1, 8),
@@ -189,12 +357,32 @@ function makeDovecoteMesh(port: PortInfo): THREE.Group {
   hole.position.set(0, 0.78, 0.401);
   g.add(hole);
 
-  const where = port.node ? `${port.mac}  @${port.node.replace(/^pigeon-/, '')}` : port.mac;
-  g.add(makeLabel(`${port.pod}\n${port.ip}\n${where}`));
+  const where = port.node ? `@${port.node.replace(/^pigeon-/, '')}` : '';
+  g.add(makeLabel(`▲ ${port.pod}  OUT`, `${port.ip}  ${where}`, port.mac, '#ffb347'));
   return g;
 }
 
-function makeLabel(text: string): THREE.Sprite {
+function makeLandingMesh(port: PortInfo): THREE.Group {
+  const g = new THREE.Group();
+  const pad = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.42, 0.46, 0.12, 10),
+    new THREE.MeshStandardMaterial({ color: 0x2a4435, roughness: 0.8 }),
+  );
+  pad.position.y = 0.06;
+  g.add(pad);
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.34, 0.04, 8, 18),
+    new THREE.MeshStandardMaterial({ color: 0x6fdc8c, emissive: 0x6fdc8c, emissiveIntensity: 0.4 }),
+  );
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.13;
+  g.add(ring);
+
+  g.add(makeLabel(`▼ ${port.pod}  IN`, port.ip, 'drop frames here', '#6fdc8c'));
+  return g;
+}
+
+function makeLabel(line1: string, line2: string, line3: string, color: string): THREE.Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 192;
@@ -204,18 +392,17 @@ function makeLabel(text: string): THREE.Sprite {
   ctx.strokeStyle = '#2c3442';
   ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
   ctx.font = 'bold 44px Consolas, monospace';
-  ctx.fillStyle = '#ffb347';
-  const lines = text.split('\n');
-  ctx.fillText(lines[0] ?? '', 18, 56);
+  ctx.fillStyle = color;
+  ctx.fillText(line1, 18, 56);
   ctx.font = '36px Consolas, monospace';
   ctx.fillStyle = '#cfd8e3';
-  ctx.fillText(lines[1] ?? '', 18, 110);
+  ctx.fillText(line2, 18, 110);
   ctx.fillStyle = '#7b8794';
-  ctx.fillText(lines[2] ?? '', 18, 160);
+  ctx.fillText(line3, 18, 160);
 
   const tex = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
   sprite.scale.set(2.6, 0.975, 1);
-  sprite.position.y = 2.1;
+  sprite.position.y = 1.9;
   return sprite;
 }

@@ -14,6 +14,11 @@ export interface Decoded {
   broadcast: boolean;
   dstMac: string;
   srcMac: string;
+  /** structured fields for filter machines / custom routing expressions */
+  etherType: number;
+  len: number;
+  ip?: { src: string; dst: string; proto: number; ttl: number };
+  l4?: { src: number; dst: number; flags?: string };
 }
 
 const ETH_ARP = 0x0806;
@@ -41,6 +46,8 @@ export function decodeFrame(b: Uint8Array, fullLen: number): Decoded {
     broadcast: false,
     dstMac: '?',
     srcMac: '?',
+    etherType: 0,
+    len: fullLen,
   };
   if (b.length < 14) return out;
 
@@ -48,6 +55,7 @@ export function decodeFrame(b: Uint8Array, fullLen: number): Decoded {
   out.srcMac = mac(b, 6);
   out.broadcast = out.dstMac === 'ff:ff:ff:ff:ff:ff';
   const etherType = u16(b, 12);
+  out.etherType = etherType;
 
   out.fields.push(
     ['eth.dst', out.dstMac + (out.broadcast ? '  (broadcast)' : '')],
@@ -79,6 +87,7 @@ export function decodeFrame(b: Uint8Array, fullLen: number): Decoded {
     const proto = b[23];
     const ttl = b[22];
     const src = ip4(b, 26), dst = ip4(b, 30);
+    out.ip = { src, dst, proto, ttl };
     out.fields.push(['ip.src', src], ['ip.dst', dst], ['ip.ttl', String(ttl)], ['ip.proto', String(proto)]);
     const l4 = 14 + ihl;
 
@@ -100,6 +109,7 @@ export function decodeFrame(b: Uint8Array, fullLen: number): Decoded {
       if (flags & 0x04) names.push('RST');
       if (flags & 0x08) names.push('PSH');
       out.kind = 'tcp';
+      out.l4 = { src: sp, dst: dp, flags: names.join(',') };
       out.summary = `TCP ${src}:${sp} → ${dst}:${dp} [${names.join(',') || '·'}]`;
       out.fields.push(['tcp.src', String(sp)], ['tcp.dst', String(dp)], ['tcp.flags', names.join(',') || 'none']);
       return out;
@@ -107,6 +117,7 @@ export function decodeFrame(b: Uint8Array, fullLen: number): Decoded {
     if (proto === 17 && b.length >= l4 + 8) {
       const sp = u16(b, l4), dp = u16(b, l4 + 2);
       out.kind = 'udp';
+      out.l4 = { src: sp, dst: dp };
       out.summary = `UDP ${src}:${sp} → ${dst}:${dp} (${fullLen}B)`;
       out.fields.push(['udp.src', String(sp)], ['udp.dst', String(dp)]);
       return out;
