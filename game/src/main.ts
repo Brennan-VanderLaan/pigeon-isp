@@ -9,8 +9,9 @@
 //                   immediately. Measures the webapp's raw ceiling and its
 //                   per-frame decide time (docs/benchmarks.md).
 import * as THREE from 'three';
-import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, orientGhost } from './game/board';
+import { Board, makeGhostBelt, makeGhostFilter, makeGhostHub, makeGhostMeter, makeGhostMidi, orientGhost } from './game/board';
 import { fdbRows } from './game/machines';
+import { midi } from './game/midi';
 import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
@@ -189,6 +190,7 @@ const ghosts: Record<string, THREE.Group> = {
   filter: makeGhostFilter(),
   hub: makeGhostHub(),
   meter: makeGhostMeter(),
+  midi: makeGhostMidi(),
 };
 for (const g of Object.values(ghosts)) {
   g.visible = false;
@@ -233,7 +235,8 @@ function openMachineInspector(col: number, row: number): void {
         return c?.type === 'filter' ? { stats: c.stats, lastFrame: c.lastFrame } : null;
       },
     );
-  } else if (cell.type === 'appliance-body' || cell.type === 'appliance-port') {
+  } else if (cell.type === 'appliance-body' || cell.type === 'appliance-port-in' ||
+             cell.type === 'appliance-port-out' || cell.type === 'appliance-pending') {
     const app = board.applianceAt(col, row);
     if (!app) return;
     activeApplianceId = app.id;
@@ -261,6 +264,21 @@ function openMachineInspector(col: number, row: number): void {
       const c = board.cellAt(col, row);
       return c?.type === 'hub' ? c.count : null;
     });
+  } else if (cell.type === 'midi') {
+    activeApplianceId = null;
+    hud.midiTest = () => midi.play(
+      (board.cellAt(col, row) as any).cfg.deviceId,
+      (board.cellAt(col, row) as any).cfg.channel,
+      (board.cellAt(col, row) as any).cfg.note,
+      (board.cellAt(col, row) as any).cfg.velocity,
+    );
+    hud.openMidiPanel(
+      { ...cell.cfg },
+      (cfg) => board.configureMidi(col, row, cfg),
+      () => midi.enable(),
+      () => ({ ready: midi.ready, error: midi.error, outputs: midi.outputs() }),
+      () => { const c = board.cellAt(col, row); return c?.type === 'midi' ? c.fired : null; },
+    );
   }
 }
 
@@ -271,6 +289,7 @@ function paintAtPointer(): void {
   if (!cell) return;
   if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, buildDir);
   if (tool === 'hub' && painting) board.setHub(cell.col, cell.row);
+  if (tool === 'midi' && painting) board.setMidi(cell.col, cell.row, buildDir);
   if (tool === 'erase' && erasing) board.eraseMachine(cell.col, cell.row);
 }
 
@@ -318,7 +337,8 @@ window.addEventListener('pointerdown', (e) => {
     if (activeApplianceId !== null) {
       const app = board.getAppliance(activeApplianceId);
       if (app && app.cells.has(`${cell.col},${cell.row}`)) {
-        board.togglePort(activeApplianceId, cell.col, cell.row);
+        const hint = board.togglePort(activeApplianceId, cell.col, cell.row);
+        if (hint) hud.log('switch', hint);
         return;
       }
     }
@@ -360,7 +380,7 @@ window.addEventListener('pointerdown', (e) => {
     if (cell) { switchDragStart = cell; switchDragEnd = cell; }
     return;
   }
-  painting = tool === 'belt' || tool === 'hub';
+  painting = tool === 'belt' || tool === 'hub' || tool === 'midi';
   erasing = tool === 'erase';
   paintAtPointer();
 });
@@ -389,7 +409,8 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '4') hud.setTool('hub');
   if (e.key === '5') hud.setTool('switch');
   if (e.key === '6') hud.setTool('meter');
-  if (e.key === '7') hud.setTool('erase');
+  if (e.key === '7') hud.setTool('midi');
+  if (e.key === '8') hud.setTool('erase');
   if (e.key === 'r' || e.key === 'R') {
     buildDir = (buildDir + 1) % 4;
     const ghost = activeGhost();

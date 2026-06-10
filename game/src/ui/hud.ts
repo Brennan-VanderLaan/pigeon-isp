@@ -4,10 +4,11 @@ import {
   DIR_ARROWS, DIR_NAMES, FILTER_FIELDS, KIND_OPTIONS, fieldByteRanges, routingSummary, sampleFrame,
   type FilterConfig, type FilterStats,
 } from '../game/filters';
+import { noteName } from '../game/midi';
 import { hexDump, type Decoded } from '../net/decode';
 import type { FrameToken } from '../types';
 
-export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'erase';
+export type Tool = 'select' | 'belt' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'erase';
 
 export interface FilterPanelState {
   config: FilterConfig;
@@ -316,7 +317,9 @@ export class Hud {
         <div class="hint2">IEEE 802.1D transparent bridge. Learns src MAC → ingress port (§7.8),
         forwards known unicast, floods unknown/broadcast out all other ports (§7.7), ages out at ${lv.ttlMs / 1000}s (§7.9).
         ARP discovery (RFC 826) relies on that flood.</div>
-        <div class="route" style="margin-top:8px">↪ click the switch's edge cells on the floor to add / remove numbered ports</div>
+        <div class="route" style="margin-top:8px">↪ each port is two lanes (belts are one-way): click an edge cell for the
+        <span style="color:#6fdc8c">IN</span> lane (host → switch), then another for the
+        <span style="color:#53d8e8">OUT</span> lane (switch → host's landing). Wire a host's roost to IN and its landing from OUT.</div>
         <label style="margin-top:10px">filtering database (CAM)</label>
         <table class="grid"><tr><th>mac</th><th>port</th><th>age</th><th>hits</th></tr>${rows}</table>
         ${rows ? '' : '<div class="hint2">empty — no frames learned yet</div>'}
@@ -378,6 +381,63 @@ export class Hud {
     renderLive();
     this.filterTimer = window.setInterval(renderLive, 600);
   }
+
+  openMidiPanel(
+    cfg: { deviceId: string; channel: number; note: number; velocity: number; cooldownMs: number; noteFromFrame: boolean },
+    onApply: (cfg: { deviceId: string; channel: number; note: number; velocity: number; cooldownMs: number; noteFromFrame: boolean }) => void,
+    enableMidi: () => Promise<void>,
+    midiState: () => { ready: boolean; error: string; outputs: { id: string; name: string }[] },
+    live: () => number | null,
+  ): void {
+    this.closeFilterPanel();
+    this.filterPanel.style.display = 'block';
+    const render = () => {
+      const st = midiState();
+      const devOpts = st.outputs.map((o) => `<option value="${o.id}" ${o.id === cfg.deviceId ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
+      const notes = Array.from({ length: 61 }, (_, i) => i + 36)
+        .map((n) => `<option value="${n}" ${n === cfg.note ? 'selected' : ''}>${noteName(n)} (${n})</option>`).join('');
+      this.filterPanel.innerHTML = `
+        <h3>♪ MIDI block</h3>
+        <div class="hint2">fires a MIDI note each time a frame passes through — your traffic becomes music.
+        Rate-limited so 5000× doesn't jam the port. pigeon.localhost is a secure origin, so Web MIDI works here.</div>
+        ${st.ready
+          ? `<div class="hint2" style="color:var(--good)">● MIDI enabled · ${st.outputs.length} output(s)</div>`
+          : `<div class="row"><button id="mi-enable">Enable MIDI</button><span class="err" style="color:${st.error ? 'var(--bad)' : 'var(--dim)'}">${esc(st.error || 'click to grant access')}</span></div>`}
+        <label>output device</label>
+        <select id="mi-dev">${devOpts || '<option>(none — enable MIDI / connect a device)</option>'}</select>
+        <div class="row">
+          <label style="margin:0">channel</label><input type="number" id="mi-ch" min="1" max="16" value="${cfg.channel + 1}" style="width:60px">
+          <label style="margin:0">velocity</label><input type="number" id="mi-vel" min="1" max="127" value="${cfg.velocity}" style="width:64px">
+          <label style="margin:0">cooldown</label><input type="number" id="mi-cd" min="0" max="2000" value="${cfg.cooldownMs}" style="width:64px">ms
+        </div>
+        <div class="row">
+          <label style="margin:0"><input type="checkbox" id="mi-nff" ${cfg.noteFromFrame ? 'checked' : ''}> note from frame</label>
+          <span id="mi-notewrap"><label style="margin:0">note</label><select id="mi-note" style="width:auto">${notes}</select></span>
+        </div>
+        <div class="row"><button id="mi-apply">Apply</button><button id="mi-test">Test ♪</button><button id="fc-close">Close</button><span class="err" id="mi-ok"></span></div>
+        <div class="hint2" id="mi-live" style="margin-top:6px">notes fired: ${live() ?? 0}</div>`;
+      const q = <T extends HTMLElement>(s: string) => this.filterPanel.querySelector<T>(s)!;
+      this.filterPanel.querySelector('#mi-enable')?.addEventListener('click', async () => { await enableMidi(); render(); });
+      const collect = () => ({
+        deviceId: q<HTMLSelectElement>('#mi-dev').value,
+        channel: Math.max(0, Math.min(15, Number(q<HTMLInputElement>('#mi-ch').value) - 1)),
+        note: Number(q<HTMLSelectElement>('#mi-note').value),
+        velocity: Number(q<HTMLInputElement>('#mi-vel').value),
+        cooldownMs: Number(q<HTMLInputElement>('#mi-cd').value),
+        noteFromFrame: q<HTMLInputElement>('#mi-nff').checked,
+      });
+      q('#mi-apply').addEventListener('click', () => { onApply(collect()); q('#mi-ok').textContent = '✓ set'; });
+      q('#mi-test').addEventListener('click', () => { onApply(collect()); this.midiTest?.(); });
+      q('#fc-close').addEventListener('click', () => this.closeFilterPanel());
+    };
+    render();
+    this.filterTimer = window.setInterval(() => {
+      const el = this.filterPanel.querySelector('#mi-live');
+      if (el) el.textContent = `notes fired: ${live() ?? 0}`;
+    }, 700);
+  }
+
+  midiTest?: () => void;
 
   openHubPanel(live: () => number | null): void {
     this.closeFilterPanel();

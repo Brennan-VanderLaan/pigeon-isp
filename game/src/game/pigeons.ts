@@ -13,6 +13,7 @@
 import * as THREE from 'three';
 import { Board, DIRS, COLS, ROWS } from './board';
 import { hubExits, meterStep } from './machines';
+import { midi } from './midi';
 import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
 import type { Bridge, FrameToken } from '../types';
 
@@ -162,18 +163,37 @@ export class Pigeon {
         const pass = meterStep(cell.state, this.token.fullLen, performance.now()).pass;
         return { kind: 'emit', emissions: [{ col, row, dir: pass ? cell.defaultDir : cell.overflowDir }] };
       }
-      case 'appliance-port': {
-        // Leaving outward through this port? pass straight off the appliance.
-        if (this.travelDir === cell.dir) {
-          return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+      case 'midi': {
+        // Play a note on pass-through, rate-limited (5000x would jam MIDI).
+        const now = performance.now();
+        if (midi.ready && now - cell.lastFireMs >= cell.cfg.cooldownMs) {
+          cell.lastFireMs = now;
+          cell.fired++;
+          // note-from-frame: pitch from a header byte so traffic is melodic.
+          const note = cell.cfg.noteFromFrame
+            ? 36 + (this.token.snapshot[Math.min(this.token.snapshot.length - 1, 19)] % 48)
+            : cell.cfg.note;
+          midi.play(cell.cfg.deviceId, cell.cfg.channel, note, cell.cfg.velocity);
         }
-        // Entering inward: the appliance routes us (802.1D for a switch).
+        return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+      }
+      case 'appliance-port-in': {
+        // A frame entered this port's IN lane — the switch routes it (802.1D),
+        // emitting at destination port(s)' OUT lanes.
         const res = board.routeAppliance(cell.applianceId, cell.portIndex, this.decoded, performance.now());
         if (res === 'filtered' || res.length === 0) return { kind: 'drop' };
         return { kind: 'emit', emissions: res };
       }
+      case 'appliance-port-out':
+        // OUT lane: switch-placed pigeons ride outward off it; anything
+        // arriving inward (mis-wired belt) is solid.
+        if (this.travelDir === cell.dir) {
+          return { kind: 'emit', emissions: [{ col, row, dir: cell.dir }] };
+        }
+        return { kind: 'wait' };
       case 'appliance-body':
-        return { kind: 'wait' }; // solid; pigeons only meet appliances at ports
+      case 'appliance-pending':
+        return { kind: 'wait' }; // solid; pigeons only meet appliances at port lanes
       case 'roost':
         return { kind: 'emit', emissions: [{ col, row, dir: cell.facing }] };
       case 'landing':
@@ -187,8 +207,10 @@ export class Pigeon {
     if (toCol < 0 || toRow < 0 || toCol >= COLS || toRow >= ROWS) return false;
     const target = board.cellAt(toCol, toRow);
     if (target?.type === 'roost') return false;
-    // Can't ride into an appliance except through one of its ports.
-    if (target?.type === 'appliance-body') return false;
+    // Appliances are solid except at IN lanes (frames enter there). OUT
+    // lanes emit but don't accept; bodies and half-placed ports are walls.
+    if (target?.type === 'appliance-body' || target?.type === 'appliance-pending' ||
+        target?.type === 'appliance-port-out') return false;
     const here = board.cellAt(this.col, this.row);
     if (here?.type === 'roost' && target === undefined) return false;
     this.toCell = { col: toCol, row: toRow };

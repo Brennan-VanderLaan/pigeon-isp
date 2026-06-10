@@ -40,34 +40,61 @@ export type Cell =
     }
   | { type: 'hub'; count: number; mesh: THREE.Group }
   | { type: 'meter'; state: MeterState; defaultDir: number; overflowDir: number; mesh: THREE.Group }
-  // Multi-cell appliance: a body cell (solid) or a numbered port cell.
+  | { type: 'midi'; dir: number; cfg: MidiCfg; lastFireMs: number; fired: number; mesh: THREE.Group }
+  // Multi-cell appliance: a body cell (solid), a port INPUT cell (frames
+  // enter here), or a port OUTPUT cell (frames leave here). Belts are
+  // one-way, so a port is two lanes — exactly like tx/rx wires on a real
+  // RJ45 port.
   | { type: 'appliance-body'; applianceId: number }
-  | { type: 'appliance-port'; applianceId: number; portIndex: number; dir: number }
+  | { type: 'appliance-port-in'; applianceId: number; portIndex: number }
+  | { type: 'appliance-port-out'; applianceId: number; portIndex: number; dir: number }
+  | { type: 'appliance-pending'; applianceId: number }
   | { type: 'roost'; port: PortInfo; facing: number; mesh: THREE.Group }
   | { type: 'landing'; port: PortInfo; mesh: THREE.Group };
 
-/** A multi-cell switch (or future router). Frames enter at a port, the FDB
- *  decides, they leave at exit port(s). IEEE 802.1D. */
+/** A multi-cell switch (or future router). A frame enters at a port's IN
+ *  cell; the FDB decides; it leaves at the destination port's OUT cell.
+ *  IEEE 802.1D. */
 export interface Appliance {
   id: number;
   kind: 'switch';
   cells: Set<string>; // body + port cells, "col,row"
   ports: AppliancePort[]; // numbered in placement order
+  pendingIn?: { col: number; row: number }; // half-placed port awaiting its OUT
   state: SwitchState;
   group: THREE.Group;
 }
 
+/** A bidirectional port: an IN lane (frames arrive) and an OUT lane (frames
+ *  leave toward that host's landing). Both wired to the same host. */
 export interface AppliancePort {
-  col: number;
-  row: number;
-  dir: number; // outward compass direction (the edge it sits on)
   index: number;
+  inCol: number;
+  inRow: number;
+  outCol: number;
+  outRow: number;
+  outDir: number; // outward compass direction of the OUT cell
 }
 
 export interface PortLoc {
   roost: { col: number; row: number };
   landing: { col: number; row: number };
   facing: number;
+}
+
+/** A MIDI block's configuration. `noteFromFrame` derives pitch from a byte
+ *  of the frame so different traffic plays different notes. */
+export interface MidiCfg {
+  deviceId: string;
+  channel: number; // 0-15
+  note: number; // 0-127 (used when noteFromFrame is off)
+  velocity: number; // 0-127
+  cooldownMs: number; // min gap between notes (5000x would jam the port)
+  noteFromFrame: boolean;
+}
+
+export function defaultMidiCfg(): MidiCfg {
+  return { deviceId: '', channel: 0, note: 60, velocity: 100, cooldownMs: 80, noteFromFrame: false };
 }
 
 // Roost/landing pairs around the perimeter (roost first, landing two cells
@@ -201,6 +228,24 @@ export class Board {
     this.onChange();
   }
 
+  setMidi(col: number, row: number, dir: number, cfg?: MidiCfg): void {
+    if (!this.clearForBuild(col, row)) return;
+    this.removeMachine(col, row);
+    const mesh = makeMidiMesh(dir);
+    mesh.position.copy(this.cellToWorld(col, row, 0.04));
+    mesh.userData.boardCell = { col, row };
+    this.group.add(mesh);
+    this.cells.set(key(col, row), { type: 'midi', dir, cfg: cfg ?? defaultMidiCfg(), lastFireMs: 0, fired: 0, mesh });
+    this.onChange();
+  }
+
+  configureMidi(col: number, row: number, cfg: MidiCfg): void {
+    const c = this.cells.get(key(col, row));
+    if (c?.type !== 'midi') return;
+    c.cfg = cfg;
+    this.onChange();
+  }
+
   setMeter(col: number, row: number, defaultDir: number, overflowDir: number, limit = 100, mode: MeterMode = 'pps'): void {
     if (!this.clearForBuild(col, row)) return;
     this.removeMachine(col, row);
@@ -272,25 +317,63 @@ export class Board {
     return id;
   }
 
-  /** Toggle a perimeter cell of an appliance as a numbered port. */
-  togglePort(applianceId: number, col: number, row: number): void {
+  /** Click an edge cell while editing a switch. Two clicks make a port:
+   *  first the IN lane (frames enter), then the OUT lane (replies leave).
+   *  Clicking any cell already in a port removes that whole port.
+   *  Returns a short hint for the HUD. */
+  togglePort(applianceId: number, col: number, row: number): string {
     const app = this.appliances.get(applianceId);
-    if (!app || !app.cells.has(key(col, row))) return;
+    if (!app || !app.cells.has(key(col, row))) return '';
     const dir = this.edgeDir(app, col, row);
-    if (dir < 0) return; // interior cell: can't be a port
+    if (dir < 0) return 'that cell is interior — ports go on the edges';
 
-    const existing = app.ports.findIndex((p) => p.col === col && p.row === row);
+    // Clicking a cell that's part of an existing port removes the port.
+    const existing = app.ports.findIndex(
+      (p) => (p.inCol === col && p.inRow === row) || (p.outCol === col && p.outRow === row),
+    );
     if (existing >= 0) {
+      const p = app.ports[existing];
+      this.cells.set(key(p.inCol, p.inRow), { type: 'appliance-body', applianceId });
+      this.cells.set(key(p.outCol, p.outRow), { type: 'appliance-body', applianceId });
       app.ports.splice(existing, 1);
-      app.ports.forEach((p, i) => (p.index = i)); // renumber
-      this.cells.set(key(col, row), { type: 'appliance-body', applianceId });
-    } else {
-      const port: AppliancePort = { col, row, dir, index: app.ports.length };
-      app.ports.push(port);
-      this.cells.set(key(col, row), { type: 'appliance-port', applianceId, portIndex: port.index, dir });
+      app.ports.forEach((q, i) => (q.index = i));
+      this.reindexPortCells(app);
+      this.rebuildApplianceMesh(app);
+      this.onChange();
+      return `removed port — ${app.ports.length} left`;
     }
+
+    if (!app.pendingIn) {
+      // First click: the IN lane.
+      app.pendingIn = { col, row };
+      this.cells.set(key(col, row), { type: 'appliance-pending', applianceId });
+      this.rebuildApplianceMesh(app);
+      return `port ${app.ports.length}: now click the OUT cell (where replies leave toward that host)`;
+    }
+
+    // Second click: the OUT lane. Can't be the same cell.
+    if (app.pendingIn.col === col && app.pendingIn.row === row) {
+      return 'pick a different cell for the OUT lane';
+    }
+    const port: AppliancePort = {
+      index: app.ports.length,
+      inCol: app.pendingIn.col, inRow: app.pendingIn.row,
+      outCol: col, outRow: row, outDir: dir,
+    };
+    app.ports.push(port);
+    this.cells.set(key(port.inCol, port.inRow), { type: 'appliance-port-in', applianceId, portIndex: port.index });
+    this.cells.set(key(port.outCol, port.outRow), { type: 'appliance-port-out', applianceId, portIndex: port.index, dir });
+    app.pendingIn = undefined;
     this.rebuildApplianceMesh(app);
     this.onChange();
+    return `port ${port.index} wired (in + out) — click an edge for another`;
+  }
+
+  private reindexPortCells(app: Appliance): void {
+    for (const p of app.ports) {
+      this.cells.set(key(p.inCol, p.inRow), { type: 'appliance-port-in', applianceId: app.id, portIndex: p.index });
+      this.cells.set(key(p.outCol, p.outRow), { type: 'appliance-port-out', applianceId: app.id, portIndex: p.index, dir: p.outDir });
+    }
   }
 
   /** Which outward edge is (col,row) on? -1 if interior (not on the hull). */
@@ -306,7 +389,10 @@ export class Board {
 
   applianceAt(col: number, row: number): Appliance | undefined {
     const c = this.cells.get(key(col, row));
-    if (c?.type === 'appliance-body' || c?.type === 'appliance-port') return this.appliances.get(c.applianceId);
+    if (c?.type === 'appliance-body' || c?.type === 'appliance-port-in' ||
+        c?.type === 'appliance-port-out' || c?.type === 'appliance-pending') {
+      return this.appliances.get(c.applianceId);
+    }
     return undefined;
   }
 
@@ -314,8 +400,9 @@ export class Board {
     return this.appliances.get(id);
   }
 
-  /** The pigeon-facing routing call: a frame entered port `ingress`, where
-   *  does it leave? Returns exit emissions, or 'filtered' to drop. */
+  /** The pigeon-facing routing call: a frame entered at port `ingress`'s IN
+   *  lane. Where does it leave? Emissions are at the exit ports' OUT lanes
+   *  (which carry replies back toward those hosts). 'filtered' = drop. */
   routeAppliance(id: number, ingress: number, frame: Decoded, now: number): Emission[] | 'filtered' {
     const app = this.appliances.get(id);
     if (!app || app.ports.length === 0) return 'filtered';
@@ -324,7 +411,7 @@ export class Board {
     return decision.exits
       .map((idx) => app.ports[idx])
       .filter(Boolean)
-      .map((p) => ({ col: p.col, row: p.row, dir: p.dir }));
+      .map((p) => ({ col: p.outCol, row: p.outRow, dir: p.outDir }));
   }
 
   private removeAppliance(id: number): void {
@@ -335,41 +422,49 @@ export class Board {
     this.appliances.delete(id);
   }
 
-  /** Rebuild an appliance's 3D body + port markers + label. */
+  /** Rebuild an appliance's 3D body + port lanes + labels. IN lanes glow
+   *  green (frames enter), OUT lanes cyan (frames leave). */
   private rebuildApplianceMesh(app: Appliance): void {
     while (app.group.children.length) app.group.remove(app.group.children[0]);
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1d4e5c, roughness: 0.5 });
-    const portMat = new THREE.MeshStandardMaterial({ color: 0x53d8e8, emissive: 0x53d8e8, emissiveIntensity: 0.7 });
-    const badgeKeep = app.group.userData.badge; // preserve badge sprite if any
+    const inMat = new THREE.MeshStandardMaterial({ color: 0x6fdc8c, emissive: 0x6fdc8c, emissiveIntensity: 0.6 });
+    const outMat = new THREE.MeshStandardMaterial({ color: 0x53d8e8, emissive: 0x53d8e8, emissiveIntensity: 0.6 });
+    const pendMat = new THREE.MeshStandardMaterial({ color: 0xffb347, emissive: 0xffb347, emissiveIntensity: 0.5 });
+    const badgeKeep = app.group.userData.badge;
     for (const k of app.cells) {
       const [col, row] = k.split(',').map(Number);
-      const isPort = this.cells.get(k)?.type === 'appliance-port';
-      const tile = new THREE.Mesh(
-        new THREE.BoxGeometry(CELL * 0.96, 0.22, CELL * 0.96),
-        isPort ? portMat : bodyMat,
-      );
+      const t = this.cells.get(k)?.type;
+      const mat = t === 'appliance-port-in' ? inMat : t === 'appliance-port-out' ? outMat
+        : t === 'appliance-pending' ? pendMat : bodyMat;
+      const tile = new THREE.Mesh(new THREE.BoxGeometry(CELL * 0.96, 0.22, CELL * 0.96), mat);
       tile.position.copy(this.cellToWorld(col, row, 0.11));
       app.group.add(tile);
     }
-    // Port number labels.
+    // Port lane labels + arrows: IN points inward, OUT points outward.
     for (const p of app.ports) {
-      const lbl = makeTinyLabel(`P${p.index}`);
-      lbl.position.copy(this.cellToWorld(p.col, p.row, 0.34));
-      app.group.add(lbl);
-      // little outward arrow
-      const d = DIRS[p.dir];
-      const arrow = new THREE.Mesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x0b0e13 }));
-      arrow.position.copy(this.cellToWorld(p.col, p.row, 0.24));
-      arrow.position.x += d.dx * 0.3;
-      arrow.position.z += d.dz * 0.3;
-      arrow.rotation.x = Math.PI / 2;
-      arrow.rotation.z = -Math.atan2(d.dx, d.dz);
-      app.group.add(arrow);
+      const inLbl = makeTinyLabel(`${p.index}`);
+      inLbl.position.copy(this.cellToWorld(p.inCol, p.inRow, 0.34));
+      app.group.add(inLbl);
+      const outLbl = makeTinyLabel(`${p.index}`);
+      outLbl.position.copy(this.cellToWorld(p.outCol, p.outRow, 0.34));
+      app.group.add(outLbl);
+      this.addLaneArrow(app, p.outCol, p.outRow, p.outDir); // outward
+      const inDir = this.edgeDir(app, p.inCol, p.inRow);
+      if (inDir >= 0) this.addLaneArrow(app, p.inCol, p.inRow, (inDir + 2) % 4); // inward
     }
     if (badgeKeep) app.group.add(badgeKeep);
-    app.group.userData.boardCell = { col: app.ports[0]?.col ?? [...app.cells][0].split(',').map(Number)[0], row: 0 };
-    // userData for picking: any cell click maps back via cells map; store id.
     app.group.userData.applianceId = app.id;
+  }
+
+  private addLaneArrow(app: Appliance, col: number, row: number, dir: number): void {
+    const d = DIRS[dir];
+    const arrow = new THREE.Mesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x0b0e13 }));
+    arrow.position.copy(this.cellToWorld(col, row, 0.24));
+    arrow.position.x += d.dx * 0.28;
+    arrow.position.z += d.dz * 0.28;
+    arrow.rotation.x = Math.PI / 2;
+    arrow.rotation.z = -Math.atan2(d.dx, d.dz);
+    app.group.add(arrow);
   }
 
   eraseMachine(col: number, row: number): void {
@@ -377,14 +472,16 @@ export class Board {
   }
 
   private static isMachine(t: string): boolean {
-    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'meter' ||
-      t === 'appliance-body' || t === 'appliance-port';
+    return t === 'belt' || t === 'filter' || t === 'hub' || t === 'meter' || t === 'midi' ||
+      t === 'appliance-body' || t === 'appliance-port-in' ||
+      t === 'appliance-port-out' || t === 'appliance-pending';
   }
 
   private removeMachine(col: number, row: number): boolean {
     const existing = this.cells.get(key(col, row));
     if (!existing || !Board.isMachine(existing.type)) return false;
-    if (existing.type === 'appliance-body' || existing.type === 'appliance-port') {
+    if (existing.type === 'appliance-body' || existing.type === 'appliance-port-in' ||
+        existing.type === 'appliance-port-out' || existing.type === 'appliance-pending') {
       this.removeAppliance(existing.applianceId); // erasing any cell scraps the box
       return true;
     }
@@ -402,7 +499,7 @@ export class Board {
   machineMeshes(): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
     for (const c of this.cells.values()) {
-      if (c.type === 'filter' || c.type === 'hub' || c.type === 'meter') out.push(c.mesh);
+      if (c.type === 'filter' || c.type === 'hub' || c.type === 'meter' || c.type === 'midi') out.push(c.mesh);
     }
     for (const app of this.appliances.values()) out.push(app.group);
     return out;
@@ -417,6 +514,8 @@ export class Board {
         setBadge(c.mesh, lbl, c.state.diverted > 0 ? '#ffb347' : '#6fdc8c');
       } else if (c.type === 'hub') {
         setBadge(c.mesh, `${c.count}`, '#8a93a0');
+      } else if (c.type === 'midi') {
+        setBadge(c.mesh, `♪ ${c.fired}`, '#c792ea');
       }
     }
     for (const app of this.appliances.values()) {
@@ -485,10 +584,14 @@ export class Board {
       if (c.type === 'meter') {
         items.push({ t: 'm', col, row, dd: c.defaultDir, od: c.overflowDir, lim: c.state.limit, mode: c.state.mode });
       }
+      if (c.type === 'midi') items.push({ t: 'M', col, row, dir: c.dir, cfg: c.cfg });
     }
     for (const app of this.appliances.values()) {
       const cells = [...app.cells].map((k) => k.split(',').map(Number));
-      items.push({ t: 'A', cells, ports: app.ports.map((p) => [p.col, p.row]), ttl: app.state.ttlMs });
+      items.push({
+        t: 'A', cells, ttl: app.state.ttlMs,
+        ports: app.ports.map((p) => [p.inCol, p.inRow, p.outCol, p.outRow]),
+      });
     }
     return JSON.stringify(items);
   }
@@ -510,11 +613,18 @@ export class Board {
         // 's' (legacy 1x1 switch) is intentionally dropped — superseded by
         // multi-port appliances.
         if (it.t === 'm') this.setMeter(it.col, it.row, it.dd, it.od, it.lim ?? it.th ?? 100, it.mode ?? 'pps');
+        if (it.t === 'M') this.setMidi(it.col, it.row, it.dir, it.cfg);
         if (it.t === 'A') {
           const cols = it.cells.map((c: number[]) => c[0]);
           const rows = it.cells.map((c: number[]) => c[1]);
           const id = this.createSwitch(Math.min(...cols), Math.min(...rows), Math.max(...cols), Math.max(...rows));
-          if (id !== null) for (const [pc, pr] of it.ports) this.togglePort(id, pc, pr);
+          if (id !== null) {
+            for (const p of it.ports) {
+              // [inC,inR,outC,outR] = two-click placement replayed.
+              this.togglePort(id, p[0], p[1]);
+              this.togglePort(id, p[2], p[3]);
+            }
+          }
         }
         if (it.t === 'f') {
           if (it.md !== undefined) {
@@ -660,12 +770,30 @@ export function makeGhostFilter(): THREE.Group {
   return ghostify(makeFilterMesh(1, 0));
 }
 
+function makeMidiMesh(dir: number): THREE.Group {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(beltBase, new THREE.MeshStandardMaterial({ color: 0x2a1838, roughness: 0.8 })));
+  // a little piano-key motif
+  const keysMat = new THREE.MeshStandardMaterial({ color: 0xe8d8ff, emissive: 0x6a3a9a, emissiveIntensity: 0.3 });
+  for (let i = 0; i < 3; i++) {
+    const key = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.16, 0.4), keysMat);
+    key.position.set(-0.18 + i * 0.18, 0.12, 0);
+    g.add(key);
+  }
+  g.add(exitArrow(dir, new THREE.MeshStandardMaterial({ color: 0xc792ea })));
+  return g;
+}
+
 export function makeGhostHub(): THREE.Group {
   return ghostify(makeHubMesh());
 }
 
 export function makeGhostMeter(): THREE.Group {
   return ghostify(makeMeterMesh(0, 1));
+}
+
+export function makeGhostMidi(): THREE.Group {
+  return ghostify(makeMidiMesh(0));
 }
 
 function makeTinyLabel(text: string): THREE.Sprite {
