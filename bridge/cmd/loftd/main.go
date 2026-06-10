@@ -42,6 +42,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,13 @@ type Port struct {
 	fd      int
 	ifindex int
 	done    chan struct{}
+
+	// Virtual ports have no veth: their wire is a WebSocket to an external
+	// agent (perch, a VPN gateway, …). Egress writes go to the agent; ingress
+	// frames arrive over the same socket. scanLoop ignores them.
+	virtual bool
+	agent   *websocket.Conn
+	agentMu sync.Mutex
 
 	rxFrames, rxBytes, txFrames, txBytes               uint64
 	dropsOverflow, dropsTTL, dropsConsumer, dropsTrunk uint64
@@ -199,6 +207,14 @@ func main() {
 		}
 		l.servePeer(conn)
 	})
+	// External agents (perch, VPN gateways) register a virtual host here.
+	http.HandleFunc("/port", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		l.servePort(conn)
+	})
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		l.mu.Lock()
 		stats := l.statsLocked()
@@ -249,6 +265,9 @@ func (l *Loft) scanLoop(dir string) {
 		l.mu.Lock()
 		var gone []*Port
 		for name, p := range l.ports {
+			if p.virtual {
+				continue // agents manage their own lifecycle via /port
+			}
 			if !seen[name] {
 				gone = append(gone, p)
 				delete(l.ports, name)
@@ -336,40 +355,45 @@ func (l *Loft) readLoop(p *Port) {
 		if sll, ok := from.(*unix.SockaddrLinklayer); ok && sll.Pkttype == unix.PACKET_OUTGOING {
 			continue
 		}
-		if n < 14 {
-			continue
-		}
-
-		l.mu.Lock()
-		p.rxFrames++
-		p.rxBytes += uint64(n)
-		haveRouter := l.client != nil
-		haveTrunk := l.trunk != nil && l.trunk.connected()
-		if !haveRouter && !haveTrunk {
-			l.noGame++
-			l.mu.Unlock()
-			continue // the router doesn't exist; the frame never happened
-		}
-		if len(l.frames) >= maxBuffered {
-			p.dropsOverflow++
-			l.mu.Unlock()
-			continue
-		}
-		fid := l.nextFID
-		l.nextFID++
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		l.frames[fid] = &bufFrame{port: p.ID, data: data, added: time.Now()}
-		l.mu.Unlock()
-
-		tok := buildToken(p.ID, fid, uint32(n), data)
-		if haveRouter {
-			l.sendToRouter(tok)
-		} else {
-			l.trunk.send(tok)
-		}
-		l.broadcastObservers(tok)
+		l.ingest(p, buf[:n])
 	}
+}
+
+// ingest releases one frame (from a veth or an agent) into the loft: buffer
+// it and tokenize to the consumer. Shared by veth readLoop and /port agents.
+func (l *Loft) ingest(p *Port, frame []byte) {
+	if len(frame) < 14 {
+		return
+	}
+	l.mu.Lock()
+	p.rxFrames++
+	p.rxBytes += uint64(len(frame))
+	haveRouter := l.client != nil
+	haveTrunk := l.trunk != nil && l.trunk.connected()
+	if !haveRouter && !haveTrunk {
+		l.noGame++
+		l.mu.Unlock()
+		return // the router doesn't exist; the frame never happened
+	}
+	if len(l.frames) >= maxBuffered {
+		p.dropsOverflow++
+		l.mu.Unlock()
+		return
+	}
+	fid := l.nextFID
+	l.nextFID++
+	data := make([]byte, len(frame))
+	copy(data, frame)
+	l.frames[fid] = &bufFrame{port: p.ID, data: data, added: time.Now()}
+	l.mu.Unlock()
+
+	tok := buildToken(p.ID, fid, uint32(len(data)), data)
+	if haveRouter {
+		l.sendToRouter(tok)
+	} else {
+		l.trunk.send(tok)
+	}
+	l.broadcastObservers(tok)
 }
 
 func buildToken(port uint16, fid, fullLen uint32, data []byte) []byte {
@@ -426,12 +450,90 @@ func (l *Loft) countDeliverLocked(target *Port, f *bufFrame) {
 }
 
 func (l *Loft) writeOut(target *Port, frame []byte) {
+	if target.virtual {
+		// Egress to an external agent: ship the raw frame over its socket.
+		target.agentMu.Lock()
+		c := target.agent
+		target.agentMu.Unlock()
+		if c != nil {
+			target.agentMu.Lock()
+			c.WriteMessage(websocket.BinaryMessage, frame)
+			target.agentMu.Unlock()
+		}
+		return
+	}
 	sll := &unix.SockaddrLinklayer{Ifindex: target.ifindex, Halen: 6}
 	copy(sll.Addr[:], frame[0:6])
 	if err := unix.Sendto(target.fd, frame, 0, sll); err != nil {
 		log.Printf("write to port %d: %v", target.ID, err)
 	}
 }
+
+// servePort registers an external agent as a virtual port (a host on the
+// pigeon network with no veth). First message is JSON {name, mac, ip}; after
+// that, binary messages are ingress ethernet frames, and the loft writes
+// egress frames back over the same socket. This is the substrate for VPN
+// gateways and the perch desktop agent — a real host, bridged in.
+func (l *Loft) servePort(conn *websocket.Conn) {
+	_, reg, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	var meta struct {
+		Name string `json:"name"`
+		MAC  string `json:"mac"`
+		IP   string `json:"ip"`
+	}
+	if json.Unmarshal(reg, &meta) != nil || meta.Name == "" || meta.MAC == "" {
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"first message must be {name,mac,ip}"}`))
+		conn.Close()
+		return
+	}
+
+	l.mu.Lock()
+	id := l.nextID
+	l.nextID++
+	p := &Port{
+		ID: id, Node: l.node, virtual: true, agent: conn, done: make(chan struct{}),
+		PortMeta: PortMeta{
+			Ifname: "agent-" + meta.Name, MAC: meta.MAC, IP: meta.IP,
+			Pod: meta.Name, Namespace: "edge", ContainerID: "agent",
+		},
+	}
+	l.ports["agent-"+meta.Name+"-"+itoa(id)] = p
+	l.byID[id] = p
+	l.mu.Unlock()
+
+	log.Printf("agent port %d joined: %s ip=%s mac=%s", id, meta.Name, meta.IP, meta.MAC)
+	l.notifyJSON(map[string]any{"type": "port-added", "port": p})
+	conn.WriteMessage(websocket.TextMessage, []byte(`{"ok":true,"id":`+itoa(id)+`}`))
+
+	for {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if mt == websocket.BinaryMessage {
+			l.ingest(p, data)
+		}
+	}
+
+	l.mu.Lock()
+	for name, q := range l.ports {
+		if q == p {
+			delete(l.ports, name)
+			break
+		}
+	}
+	delete(l.byID, id)
+	l.mu.Unlock()
+	conn.Close()
+	log.Printf("agent port %d (%s) left", id, meta.Name)
+	l.notifyJSON(map[string]any{"type": "port-removed", "id": id})
+}
+
+func itoa(v uint16) string { return strconv.Itoa(int(v)) }
 
 func (l *Loft) dropLocal(fid uint32) {
 	l.mu.Lock()

@@ -101,6 +101,33 @@ Consumers may also attach as **observers** (`/ws?mode=observe`): read-only —
 tokens, port events and stats, no routing verbs. One router at a time (latest
 wins); any number of observers.
 
+## External agents — bridging a real host in (`/port`)
+
+A port doesn't have to be a pod veth. An **agent** connects to the gateway
+loft at `ws://<gateway>:9777/port` and becomes a **virtual port** — a host on
+the pigeon network with no veth, its wire is the WebSocket:
+
+1. First message (text): registration `{"name","mac","ip"}`. The loft creates
+   a virtual port, assigns an id, announces `port-added`, replies `{"ok",id}`.
+2. Thereafter, **binary messages from the agent are ingress ethernet frames**
+   (tokenized to the consumer like any veth frame), and the loft **writes
+   egress frames back to the agent** over the same socket.
+3. On disconnect the port is removed (`port-removed`).
+
+So the agent speaks raw ethernet both ways. What it does with that is up to it:
+
+- **`perch -synthetic`** (`bridge/cmd/perch`) answers ARP who-has for its IP
+  and replies to ICMP echo — a minimal pingable host, used to prove external
+  bridging end to end.
+- **`perch -tap`** (Linux) bridges a real TAP device: actual host traffic
+  rides the factory.
+- A **VPN gateway** terminates WireGuard/TAP from remote desktops and presents
+  them as virtual ports — see docs/edge.md.
+
+Virtual ports are identical to veth ports from the consumer's view (same
+tokens, deliver/drop, drop counters, board roost+landing). The aviary CNI is
+not involved — the agent IS the network stack for its host.
+
 ## Consumer rules
 
 1. Decide every token: `deliver` or `drop`. Sitting on tokens costs you

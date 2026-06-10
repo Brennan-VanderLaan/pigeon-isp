@@ -1,0 +1,44 @@
+# perch: an external agent that bridges a synthetic host into the pigeon
+# network via the loft's /port API. It needs to reach the gateway loft
+# (control-plane node, 10.5.0.2:9777) — an infra-network pod can, an aviary
+# pod cannot (aviary has no normal connectivity). So perch lives in
+# pigeon-system (infra net) and connects OUT to the gateway; its host
+# presence on the aviary is entirely virtual.
+#
+# Built in-cluster from the bridge source (same no-registry pattern).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perch
+  namespace: pigeon-system
+  labels:
+    app: perch
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: perch
+      image: golang:1.24-alpine
+      env:
+        - name: GOMODCACHE
+          value: /gocache
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          mkdir -p /build /out
+          tar xzf /src/loft-src.tgz -C /build
+          cd /build
+          CGO_ENABLED=0 go build -o /out/perch ./cmd/perch
+          exec /out/perch -gateway 10.5.0.2:9777 -name perch -ip 10.99.0.250 -mac 0a:58:0a:63:fe:fe
+      volumeMounts:
+        - name: src
+          mountPath: /src
+          readOnly: true
+        - name: gocache
+          mountPath: /gocache
+  volumes:
+    - name: src
+      configMap:
+        name: loft-src
+    - name: gocache
+      emptyDir: {}
