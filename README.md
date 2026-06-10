@@ -19,10 +19,11 @@ Requirements: Docker Desktop, `talosctl`, `kubectl`, Node 20+ (only for local
 game dev), PowerShell.
 
 ```powershell
-.\cluster\up.ps1            # ephemeral Talos cluster, throwaway PKI, ~5 min
-# game:   http://pigeon.localhost     (served from the cluster via Traefik)
-# argocd: http://argocd.localhost
-.\cluster\ping-test.ps1     # alice pings bob — fails until YOU build the route
+.\cluster\up.ps1            # ephemeral 3-node Talos cluster, throwaway PKI, ~5 min
+# game + speedtest + health:  http://pigeon.localhost   (served from the cluster)
+# argocd:                     http://argocd.localhost
+node tools\autoroute.mjs    # attach a router (or play the game and build belts)
+.\cluster\ping-test.ps1     # alice pings bob ACROSS NODES through your routing
 .\cluster\down.ps1          # burn it all down; nothing is left behind
 ```
 
@@ -40,11 +41,13 @@ npm run dev                 # http://localhost:5173/?sim=1
 
 | Path        | What it is |
 |-------------|------------|
-| `game/`     | TypeScript + three.js factory floor. Belts, dovecotes, pigeons, packet inspector. |
-| `bridge/`   | One Go module, two binaries. `loftd`: AF_PACKET tap per aviary veth, token protocol to the game over WebSocket. `pigeon-cni`: dual-mode CNI plugin. |
-| `cluster/`  | `up.ps1`/`down.ps1` Talos lifecycle, manifests for the loft, Traefik, the in-cluster game build, and the aviary test pods. |
+| `game/`     | TypeScript + three.js webapp: the factory floor, plus **Speedtest** and **Health** tabs (speedtest-style baseline-vs-pigeon benchmarks, cluster/loft telemetry). |
+| `bridge/`   | One Go module, two binaries. `loftd`: AF_PACKET tap per aviary veth, token protocol, multi-node trunks (star control plane, mesh data plane). `pigeon-cni`: dual-mode CNI plugin. |
+| `tower/`    | In-cluster admin service: health, kubelet usage, and the `/api/run` benchmark trigger (iperf3, baseline path vs pigeon path). |
+| `tools/`    | `autoroute.mjs` — headless MAC-learning consumer (the "it could be scripts" proof, and the bench workhorse). |
+| `cluster/`  | `up.ps1 -Workers 2` / `down.ps1` Talos lifecycle + all manifests. |
 | `gitops/`   | ArgoCD app-of-apps. `up.ps1 -GitRepo <url>` points ArgoCD at your remote. |
-| `docs/`     | Architecture, performance model, roadmap. |
+| `docs/`     | Architecture, the Pigeon API contract, performance model, roadmap. |
 
 ## The one rule
 

@@ -7,6 +7,8 @@ export interface PortInfo {
   ip: string;
   pod: string;
   namespace: string;
+  /** which cluster node hosts this port (multi-node lofts) */
+  node?: string;
 }
 
 /** A pigeon's papers: the token loftd sends instead of the full frame.

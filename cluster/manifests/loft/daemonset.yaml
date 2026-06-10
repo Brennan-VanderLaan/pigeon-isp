@@ -38,6 +38,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # The gateway loft (Pigeon API endpoint) lives on the control
+            # plane — 10.5.0.2 is fixed in the talos docker provisioner. A
+            # loft whose NODE_IP matches acts as gateway; others trunk to it.
+            - name: LOFT_GATEWAY
+              value: "10.5.0.2:9777"
             - name: GOMODCACHE
               value: /gocache
           command:
@@ -66,7 +75,7 @@ spec:
                 ip route replace "10.244.$i.0/24" via "$NET.$i" 2>/dev/null || true
               done
               mkdir -p /run/pigeon/ports
-              printf '{"bridgeSubnet":"%s","bridgeGW":"%s"}' "$SUBNET" "$GW" > /run/pigeon/node.json
+              printf '{"bridgeSubnet":"%s","bridgeGW":"%s","nodeOctet":%s}' "$SUBNET" "$GW" "$X" > /run/pigeon/node.json
 
               echo "building the loft..."
               mkdir -p /build /out
@@ -88,7 +97,8 @@ spec:
               EOF
 
               echo "opening the loft"
-              exec /out/loftd -listen :9777 -ports-dir /run/pigeon/ports
+              exec /out/loftd -listen :9777 -ports-dir /run/pigeon/ports \
+                -node "$NODE_NAME" -node-ip "$NODE_IP" -gateway "$LOFT_GATEWAY"
           volumeMounts:
             - name: src
               mountPath: /src

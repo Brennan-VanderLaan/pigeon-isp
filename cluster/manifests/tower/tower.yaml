@@ -1,0 +1,149 @@
+# The control tower: admin telemetry + speedtest API (docs: tower/main.go).
+# Same no-registry pattern: builds from the tower-src ConfigMap at start.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tower
+  namespace: pigeon-system
+---
+# Lab-cluster admin scope: read everything, exec into bench pods, proxy
+# kubelet stats.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tower
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/proxy]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tower
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tower
+subjects:
+  - kind: ServiceAccount
+    name: tower
+    namespace: pigeon-system
+---
+# Baseline iperf3 server on the INFRA network — the "what can the node
+# network practically do" half of the speedtest. Anti-affinity vs tower so
+# the test actually crosses nodes.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-server
+  namespace: pigeon-system
+  labels:
+    app: pigeon-bench-infra
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: pigeon-bench-infra
+          topologyKey: kubernetes.io/hostname
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      args: ["-s"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tower
+  namespace: pigeon-system
+  labels:
+    app: tower
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tower
+  template:
+    metadata:
+      labels:
+        app: tower
+        app.kubernetes.io/part-of: pigeon-bench-infra
+    spec:
+      serviceAccountName: tower
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: pigeon-bench-infra
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: tower
+          image: golang:1.24-alpine
+          env:
+            - name: GOMODCACHE
+              value: /gocache
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              apk add --no-cache iperf3 >/dev/null
+              mkdir -p /build /out
+              tar xzf /src/tower-src.tgz -C /build
+              cd /build
+              CGO_ENABLED=0 go build -o /out/tower .
+              exec /out/tower
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: gocache
+              mountPath: /gocache
+      volumes:
+        - name: src
+          configMap:
+            name: tower-src
+        - name: gocache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tower
+  namespace: pigeon-system
+spec:
+  selector:
+    app: tower
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tower
+  namespace: pigeon-system
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: pigeon.localhost
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: tower
+                port:
+                  number: 8080

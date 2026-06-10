@@ -7,6 +7,7 @@
 #   .\cluster\up.ps1 -SkipArgoCD           # skip argocd (faster)
 #   .\cluster\up.ps1 -GitRepo https://...  # also point ArgoCD at your remote
 param(
+    [int]$Workers = 2,
     [string]$GitRepo = "",
     [switch]$SkipArgoCD
 )
@@ -23,9 +24,18 @@ foreach ($tool in "talosctl", "kubectl", "docker", "tar") {
 # Default docker-provisioner CIDR puts the (single) control plane at 10.5.0.2.
 $nodeIP = "10.5.0.2"
 
+# Stale talosconfig contexts from destroyed clusters make talosctl suffix the
+# new context (pigeon -> pigeon-1) and point --context pigeon at a dead
+# endpoint. Clean ours up front; never touch non-pigeon contexts.
+foreach ($ctx in (talosctl config contexts 2>$null | Select-String -Pattern "^\*?\s+(pigeon(-\d+)?)\s" | ForEach-Object { $_.Matches[0].Groups[1].Value })) {
+    cmd /c "echo y| talosctl config remove $ctx 2>nul"
+}
+
 $existing = cmd /c "docker ps -q -f name=$clusterName-controlplane-1 2>nul"
 if ($existing) {
     Write-Host "==> cluster '$clusterName' already running, skipping create" -ForegroundColor Yellow
+    # Re-adopt its talosconfig so --context pigeon resolves.
+    cmd /c "talosctl config merge `"$env:USERPROFILE\.talos\clusters\$clusterName\talosconfig`" 2>nul"
 } else {
     Write-Host "==> creating Talos cluster '$clusterName' (fresh PKI, no CNI)" -ForegroundColor Cyan
     # --wait=false: with no CNI the health check would wait forever for Ready
@@ -33,7 +43,7 @@ if ($existing) {
     talosctl cluster create `
         --name $clusterName `
         --provisioner docker `
-        --workers 0 `
+        --workers $Workers `
         --exposed-ports "80:80/tcp,9777:9777/tcp" `
         --config-patch "@$PSScriptRoot\talos-patch.yaml" `
         --wait=false
@@ -59,7 +69,7 @@ Write-Host "==> waiting for the API server and node registration" -ForegroundCol
 $deadline = (Get-Date).AddMinutes(5)
 while ($true) {
     $nodes = cmd /c "kubectl get nodes -o name 2>nul"
-    if ($LASTEXITCODE -eq 0 -and $nodes -and ($nodes | Measure-Object).Count -ge 1) { break }
+    if ($LASTEXITCODE -eq 0 -and $nodes -and ($nodes | Measure-Object).Count -ge (1 + $Workers)) { break }
     if ((Get-Date) -gt $deadline) { throw "nodes never registered" }
     Start-Sleep 5
 }
@@ -72,6 +82,8 @@ tar -czf "$tmp\loft-src.tgz" -C "$repo\bridge" go.mod go.sum cmd
 if ($LASTEXITCODE -ne 0) { throw "failed to tar bridge source" }
 tar -czf "$tmp\game-src.tgz" -C "$repo\game" package.json index.html tsconfig.json vite.config.ts src
 if ($LASTEXITCODE -ne 0) { throw "failed to tar game source" }
+tar -czf "$tmp\tower-src.tgz" -C "$repo\tower" go.mod go.sum main.go
+if ($LASTEXITCODE -ne 0) { throw "failed to tar tower source" }
 
 Write-Host "==> deploying the loft (builds loftd + pigeon-cni in-cluster)" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\loft\namespace.yaml"
@@ -86,9 +98,11 @@ if ($LASTEXITCODE -ne 0) { throw "loft daemonset did not come up" }
 Write-Host "==> waiting for nodes to go Ready (pigeon-cni installed)" -ForegroundColor Cyan
 kubectl wait --for=condition=Ready nodes --all --timeout=5m
 
-Write-Host "==> deploying Traefik + the game web app" -ForegroundColor Cyan
+Write-Host "==> deploying Traefik, the game web app, and the tower" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\infra\"
 kubectl apply -f "$PSScriptRoot\manifests\web\"
+kubectl -n pigeon-system create configmap tower-src --from-file="$tmp\tower-src.tgz" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f "$PSScriptRoot\manifests\tower\"
 
 Write-Host "==> releasing the aviary (alice and bob)" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\aviary\"

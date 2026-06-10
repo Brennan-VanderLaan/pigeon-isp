@@ -19,10 +19,11 @@ interface WirePort {
   ip: string;
   pod: string;
   namespace: string;
+  node?: string;
 }
 
 function toPortInfo(p: WirePort): PortInfo {
-  return { id: p.id, ifname: p.ifname, mac: p.mac, ip: p.ip, pod: p.pod, namespace: p.namespace };
+  return { id: p.id, ifname: p.ifname, mac: p.mac, ip: p.ip, pod: p.pod, namespace: p.namespace, node: p.node };
 }
 
 export class WsBridge implements Bridge {

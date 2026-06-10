@@ -13,7 +13,9 @@ import { PigeonManager } from './game/pigeons';
 import { World } from './game/world';
 import { SimBridge } from './net/simbridge';
 import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
+import { Health } from './ui/health';
 import { Hud, type Tool } from './ui/hud';
+import { Speedtest } from './ui/speedtest';
 import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
 
 const params = new URLSearchParams(location.search);
@@ -257,3 +259,24 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 hud.log('pigeon-isp', 'welcome to the loft. paint belts (2), rotate with R, route the pigeons.');
+
+// ---- views (factory / speedtest / health) -------------------------------------
+
+new Speedtest();
+const healthView = new Health();
+const viewPanels: Record<string, HTMLElement | null> = {
+  speedtest: document.getElementById('speedtest'),
+  health: document.getElementById('health'),
+};
+
+document.querySelectorAll<HTMLButtonElement>('#views button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const view = btn.dataset.view!;
+    document.querySelectorAll('#views button').forEach((b) => b.classList.toggle('active', b === btn));
+    for (const [name, panel] of Object.entries(viewPanels)) {
+      if (panel) panel.style.display = name === view ? 'block' : 'none';
+    }
+    if (view === 'health') healthView.show();
+    else healthView.hide();
+  });
+});

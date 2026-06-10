@@ -77,24 +77,29 @@ tokenization. Offloaded frames count toward `txFrames` and a per-rule counter;
 still no silent path.
 
 
-## Multi-node (design)
+## Multi-node (implemented): star control plane, mesh data plane
 
-Aviary pods will eventually span nodes; frames hop between lofts over the
-**standard node network** (the infra net / node IPs — boring transport on
-purpose, the strangeness stays at the edges):
+- **Gateway**: the control-plane node's loft is the Pigeon API endpoint.
+  Consumers attach to it and see the union of every node's ports (each
+  carries a `"node"` field). The consumer wire protocol is identical to
+  single-node; `hello` carries `version` for future evolution.
+- **Trunks** (`/trunk`, edge → gateway): control only — port registry,
+  per-second stats, and tokens (the gateway rewrites edge-local port/frame
+  ids into its consumer-facing id space). Tens of bytes per frame.
+- **Mesh** (`/peer`, loft ↔ loft): payloads. A cross-node `deliver` becomes a
+  `send-remote` instruction to the ingress loft, which pushes the buffered
+  frame straight to the egress loft over the standard node network. One hop;
+  the gateway and the consumer never carry payloads. Same-node deliveries are
+  forwarded verbatim and never leave the node.
+- Failures follow the lifecycle rule: an unreachable peer or a dead edge
+  turns in-flight frames into `dropped:trunk` / `drops.trunk` — counted,
+  never silent.
+- Flow offload (reserved `0x10/0x11`) will reuse the mesh: an offloaded
+  cross-node flow is pure loft→loft forwarding with no tokens at all.
 
-- Port addressing grows a node scope: `nodeName/portId`. `hello` gains
-  `{"node":"<name>"}`.
-- Each loft dials its peers (`/trunk` endpoint, discovered via the port
-  metadata a future controller publishes, or static config). A trunk carries
-  *full payloads* — loft A → loft B handoff is `deliver` with a remote port:
-  the consumer still makes the routing decision; the lofts just haul.
-- A consumer may attach to many lofts (one socket each) or to one loft that
-  proxies its peers — TBD when built, but the lifecycle table above is
-  invariant: a trunk transfer that fails becomes `dropped:trunk` with a
-  counter, not a mystery.
-- In the game this renders as inter-node links — undersea cables between
-  factory islands. In a script it's just another egress port.
+Consumers may also attach as **observers** (`/ws?mode=observe`): read-only —
+tokens, port events and stats, no routing verbs. One router at a time (latest
+wins); any number of observers.
 
 ## Consumer rules
 

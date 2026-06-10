@@ -25,11 +25,26 @@ t3 loftd writes egress veth  ─┘
 
 ## Running it
 
+**The speedtest webapp** (multi-node): open `http://pigeon.localhost` →
+**Speedtest** tab. Two buttons, two numbers:
+
+- *baseline* — tower pod → baseline-server pod on another node, kernel
+  routing on the infra network. The node network's practical ceiling.
+- *pigeon* — iperf3 between aviary pods on different nodes: every frame rides
+  the loft mesh and your consumer. Keep a router attached (Factory tab in
+  `?autoroute=1`, or `node tools/autoroute.mjs`) or it reads zero, correctly.
+
+Results include RTT, retransmits/jitter/loss, and the loft-side verdict
+latency delta for exactly the frames the test moved. The **Health** tab is
+the same tower talking: node readiness, CPU/mem from the kubelet summary API,
+and each loft's role/ports/trunk drops.
+
+CLI equivalents:
+
 ```powershell
-# 1. cluster up, then open the consumer at its ceiling:
-#    http://pigeon.localhost/?autoroute=1   (MAC-learning switch, no physics)
 .\cluster\bench-test.ps1                    # ping RTT + iperf3 TCP + UDP + loft telemetry
-.\cluster\bench-test.ps1 -Seconds 30 -UdpRate 500M
+# or hit the tower directly:
+#   POST http://pigeon.localhost/api/run {"test":"pigeon","proto":"tcp","seconds":10}
 
 # client-only stress (no cluster): how many tokens/s can the page ingest?
 #    http://localhost:5173/?storm=20000
@@ -50,6 +65,21 @@ pod → AF_PACKET → WebSocket → JS MAC table → WebSocket → AF_PACKET →
 | iperf3 TCP, 10 s | **292 Mbit/s** sustained (270 retransmits) |
 | iperf3 UDP @100M | 100 Mbit/s, **0% loss**, 0.14 ms jitter |
 | loft deliverLatency under load | ~1.4 ms avg, ~69 ms max |
+
+**Multi-node (same day, 1 CP + 2 workers):** alice (worker-1) ↔ bob
+(worker-2), every frame riding edge trunk → gateway → consumer → mesh push:
+
+| Test (cross-node) | Result |
+|---|---|
+| baseline iperf3 TCP (infra path, kernel-routed) | **52.7 Gbit/s**, 0.10 ms RTT |
+| pigeon iperf3 TCP | **269.8 Mbit/s**, 0% loss |
+| pigeon ICMP RTT (steady state) | ~1.9 ms |
+
+The pigeon number is within 8% of single-node — the trunk + mesh hop costs
+almost nothing; the per-token consumer round trip remains the wall, exactly
+where the architecture wants it (that's what batching and offload remove).
+The 195× baseline gap is the honest score the Speedtest tab shows; watching
+it close is the roadmap.
 
 Lesson that cost an hour: veth checksum offload. The pod kernel leaves
 TCP/UDP checksums unfilled (CHECKSUM_PARTIAL) for "hardware"; a raw tap

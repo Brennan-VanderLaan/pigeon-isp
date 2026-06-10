@@ -189,7 +189,8 @@ function makeDovecoteMesh(port: PortInfo): THREE.Group {
   hole.position.set(0, 0.78, 0.401);
   g.add(hole);
 
-  g.add(makeLabel(`${port.pod}\n${port.ip}\n${port.mac}`));
+  const where = port.node ? `${port.mac}  @${port.node.replace(/^pigeon-/, '')}` : port.mac;
+  g.add(makeLabel(`${port.pod}\n${port.ip}\n${where}`));
   return g;
 }
 

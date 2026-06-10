@@ -72,6 +72,13 @@ spec:
     spec:
       serviceAccountName: traefik
       hostNetwork: true
+      # Docker provisioner publishes host ports on the control-plane node;
+      # the :80 entrypoint must terminate there.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
       containers:
         - name: traefik
           image: traefik:v3.3

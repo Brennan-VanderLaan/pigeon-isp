@@ -113,11 +113,19 @@ The plan for "Pigeon ISP as an actual ISP":
 - Security note for later: that endpoint needs auth (the throwaway-PKI client
   cert story fits — mint an agent cert at cluster create).
 
-## Known limitations (deliberate, for now)
+## Multi-node
 
-- Aviary IPAM is node-local; aviary pods must share one node. The cluster is
-  single-node anyway (`--exposed-ports` only publishes on the init node, so
-  everything lives there). Multi-node aviary = milestone "build a WAN".
+The cluster defaults to 1 control plane + 2 workers (`up.ps1 -Workers N`).
+Aviary pods spread across nodes (anti-affinity) and live in one flat
+`10.99.0.0/16` — each node allocates from its own `/24` inside it, so any pod
+ARPs any other on-link and the consumer stays the only router. Lofts form a
+star control plane (edges trunk to the gateway on the control-plane node,
+which is the single consumer endpoint) and a mesh data plane (payloads go
+ingress-loft → egress-loft directly). Details in docs/pigeon-api.md. The
+tower (`tower/`) is the admin brain: health, kubelet usage, and the
+speedtest API the webapp's Speedtest/Health tabs talk to.
+
+## Known limitations (deliberate, for now)
 - CoreDNS works on the infra network, but aviary pods doing DNS would need you
   to route their queries — that's a future goal ("make DNS work"), not a bug.
 - One game client per loft; multiplayer would need a session broker.

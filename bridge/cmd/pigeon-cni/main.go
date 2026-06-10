@@ -41,14 +41,17 @@ import (
 )
 
 const (
-	stateDir     = "/run/pigeon"
-	portsDir     = stateDir + "/ports"
-	nodeFile     = stateDir + "/node.json"
-	lockFile     = stateDir + "/ipam.lock"
-	aviaryNS     = "aviary"
-	bridgeName   = "cni0"
-	aviarySubnet = "10.244.0.0/24"
-	firstHost    = 10
+	stateDir   = "/run/pigeon"
+	portsDir   = stateDir + "/ports"
+	nodeFile   = stateDir + "/node.json"
+	lockFile   = stateDir + "/ipam.lock"
+	aviaryNS   = "aviary"
+	bridgeName = "cni0"
+	// Aviary is one flat L2 /16 so cross-node pods ARP each other on-link —
+	// the consumer is the only router. Each node allocates from its own /24
+	// inside it (10.99.<nodeOctet>.x) so node-local IPAM can't collide.
+	aviaryNet = "10.99"
+	firstHost = 10
 )
 
 type netConf struct {
@@ -60,6 +63,7 @@ type netConf struct {
 type nodeInfo struct {
 	BridgeSubnet string `json:"bridgeSubnet"` // e.g. 10.244.2.0/24
 	BridgeGW     string `json:"bridgeGW"`     // e.g. 10.244.2.1
+	NodeOctet    int    `json:"nodeOctet"`    // this node's /24 inside the aviary /16
 }
 
 type ipamState struct {
@@ -124,14 +128,15 @@ func cmdAdd() error {
 	}
 
 	// Pick subnet + IPAM pool by mode.
+	node, err := readNode()
+	if err != nil {
+		return fmt.Errorf("node not prepped by loft yet: %w", err)
+	}
 	var subnet, gw, pool string
 	if gameMode {
-		subnet, gw, pool = aviarySubnet, "", "aviary"
+		// Allocate from this node's /24, address as the flat aviary /16.
+		subnet, gw, pool = fmt.Sprintf("%s.%d.0/16", aviaryNet, node.NodeOctet), "", "aviary"
 	} else {
-		node, err := readNode()
-		if err != nil {
-			return fmt.Errorf("node not prepped by loft yet: %w", err)
-		}
 		subnet, gw, pool = node.BridgeSubnet, node.BridgeGW, "infra"
 	}
 	ip, err := allocIP(pool, subnet, containerID)

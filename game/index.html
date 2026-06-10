@@ -53,13 +53,64 @@
     #toolbar .hint { color: var(--dim); margin-left: 6px; }
 
     #banner {
-      top: 10px; left: 50%; transform: translateX(-50%);
+      top: 56px; left: 50%; transform: translateX(-50%);
       color: var(--accent); display: none;
     }
+
+    #views {
+      top: 10px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 6px; padding: 6px;
+    }
+    #views button {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer;
+    }
+    #views button.active { border-color: var(--accent); color: var(--accent); }
+
+    .fullpanel {
+      position: fixed; inset: 64px 16px 16px 16px; background: var(--panel);
+      border: 1px solid var(--edge); border-radius: 10px; padding: 18px;
+      overflow-y: auto; display: none; z-index: 5;
+    }
+    .fullpanel h2 { margin: 0 0 4px; color: var(--accent); }
+    .fullpanel .sub { color: var(--dim); margin-bottom: 14px; }
+    .fullpanel button {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 8px 16px; font: inherit; cursor: pointer;
+    }
+    .fullpanel button:disabled { opacity: 0.4; cursor: wait; }
+    .fullpanel select, .fullpanel input {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 7px 10px; font: inherit;
+    }
+    .cards { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0; }
+    .card {
+      background: #131a26; border: 1px solid var(--edge); border-radius: 10px;
+      padding: 14px 18px; min-width: 240px; flex: 1;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 13px; color: var(--dim); font-weight: normal; }
+    .card .big { font-size: 34px; font-weight: bold; }
+    .card .big.baseline { color: #8ab4ff; }
+    .card .big.pigeon { color: var(--accent); }
+    .card .small { color: var(--dim); font-size: 12px; margin-top: 6px; white-space: pre-line; }
+    .bar { height: 10px; background: #0c1118; border-radius: 5px; margin-top: 10px; overflow: hidden; }
+    .bar > div { height: 100%; border-radius: 5px; }
+    table.grid { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    table.grid th { text-align: left; color: var(--dim); font-weight: normal; padding: 4px 8px; border-bottom: 1px solid var(--edge); }
+    table.grid td { padding: 4px 8px; border-bottom: 1px solid #1a2230; }
+    .ok { color: var(--good); }
+    .bad { color: var(--bad); }
   </style>
 </head>
 <body>
   <div id="app"></div>
+  <div id="views" class="panel">
+    <button data-view="factory" class="active">Factory</button>
+    <button data-view="speedtest">Speedtest</button>
+    <button data-view="health">Health</button>
+  </div>
+  <div id="speedtest" class="fullpanel"></div>
+  <div id="health" class="fullpanel"></div>
   <div id="status" class="panel">
     <span class="mode" id="mode">connecting…</span>
     <span id="stat-ports">ports: 0</span>

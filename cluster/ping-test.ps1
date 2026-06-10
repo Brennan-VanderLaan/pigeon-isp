@@ -6,8 +6,13 @@ $ErrorActionPreference = "Continue"
 $bobIP = kubectl -n aviary get pod bob -o jsonpath='{.status.podIP}'
 if (-not $bobIP) { throw "bob has no IP - is the cluster up? (cluster\up.ps1)" }
 $aliceIP = kubectl -n aviary get pod alice -o jsonpath='{.status.podIP}'
+$aliceNode = kubectl -n aviary get pod alice -o jsonpath='{.spec.nodeName}'
+$bobNode = kubectl -n aviary get pod bob -o jsonpath='{.spec.nodeName}'
 
-Write-Host "alice ($aliceIP) -> bob ($bobIP): releasing the pigeons" -ForegroundColor Cyan
+Write-Host "alice ($aliceIP on $aliceNode) -> bob ($bobIP on $bobNode): releasing the pigeons" -ForegroundColor Cyan
+if ($aliceNode -ne $bobNode) {
+    Write-Host "(cross-node: every frame rides the trunk + mesh)" -ForegroundColor DarkGray
+}
 Write-Host "(watch the game: ARP who-has flies first, then ICMP echoes)" -ForegroundColor DarkGray
 kubectl -n aviary exec alice -- ping -c 4 -W 5 $bobIP
 if ($LASTEXITCODE -eq 0) {
