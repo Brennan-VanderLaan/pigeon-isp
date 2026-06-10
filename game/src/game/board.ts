@@ -97,16 +97,28 @@ export function defaultMidiCfg(): MidiCfg {
   return { deviceId: '', channel: 0, note: 60, velocity: 100, cooldownMs: 80, noteFromFrame: false };
 }
 
-// Roost/landing pairs around the perimeter (roost first, landing two cells
-// over), generated: 2 pairs per edge = 8 hosts. The sandbox spawns hosts at
-// runtime; the floor has to keep up.
+// Roost/landing pairs around the perimeter. The FIRST 8 indices are the
+// original layout (kept byte-stable so saved host->slot maps don't shift);
+// the rest are appended for the bigger host counts the sandbox + VPN bring.
+// Persisted assignment is by host identity, and new hosts take the lowest
+// free slot — so they APPEND, never displace an existing host.
 const SLOTS: PortLoc[] = (() => {
   const out: PortLoc[] = [];
+  // original 8 (indices 0-7) — do not reorder
   for (const row of [3, 10]) {
     out.push({ roost: { col: 0, row }, landing: { col: 0, row: row + 2 }, facing: 0 });
     out.push({ roost: { col: COLS - 1, row }, landing: { col: COLS - 1, row: row + 2 }, facing: 2 });
   }
   for (const col of [9, 17]) {
+    out.push({ roost: { col, row: 0 }, landing: { col: col + 2, row: 0 }, facing: 1 });
+    out.push({ roost: { col, row: ROWS - 1 }, landing: { col: col + 2, row: ROWS - 1 }, facing: 3 });
+  }
+  // appended slots (index 8+), placed to avoid the originals
+  for (const row of [6, 13]) {
+    out.push({ roost: { col: 0, row }, landing: { col: 0, row: row === 13 ? 14 : row + 2 }, facing: 0 });
+    out.push({ roost: { col: COLS - 1, row }, landing: { col: COLS - 1, row: row === 13 ? 14 : row + 2 }, facing: 2 });
+  }
+  for (const col of [2, 13, 23]) {
     out.push({ roost: { col, row: 0 }, landing: { col: col + 2, row: 0 }, facing: 1 });
     out.push({ roost: { col, row: ROWS - 1 }, landing: { col: col + 2, row: ROWS - 1 }, facing: 3 });
   }

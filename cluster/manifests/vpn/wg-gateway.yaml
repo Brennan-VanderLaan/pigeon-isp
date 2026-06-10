@@ -1,0 +1,102 @@
+# wg-gateway: terminate WireGuard from real desktops and bridge each peer,
+# per-peer, onto the pigeon network (loft /port API). hostNetwork on the
+# control-plane node so its UDP :51820 is the port Docker publishes to the
+# host (see up.ps1 --exposed-ports). Userspace WireGuard — no kernel module,
+# no privileges beyond binding the socket.
+#
+# NOTE: the WireGuard UDP port must be exposed at cluster-create time
+# (up.ps1 publishes 51820/udp). On a cluster created before that, the
+# per-peer hosts still register and configs still serve, but the tunnel
+# isn't reachable until you re-run up.ps1.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wg-gateway
+  namespace: pigeon-system
+  labels:
+    app: wg-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wg-gateway
+  template:
+    metadata:
+      labels:
+        app: wg-gateway
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      containers:
+        - name: wg-gateway
+          image: golang:1.24-alpine
+          env:
+            - name: GOMODCACHE
+              value: /gocache
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /build /out
+              tar xzf /src/loft-src.tgz -C /build
+              cd /build
+              CGO_ENABLED=0 go build -o /out/wggw ./cmd/wggw
+              exec /out/wggw -gateway 10.5.0.2:9777 -wg-port 51820 \
+                -endpoint 127.0.0.1:51820 -peers 4 -base-ip 10.99.0.200 -http :8088
+          ports:
+            - name: wg
+              containerPort: 51820
+              protocol: UDP
+            - name: http
+              containerPort: 8088
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: gocache
+              mountPath: /gocache
+      volumes:
+        - name: src
+          configMap:
+            name: loft-src
+        - name: gocache
+          emptyDir: {}
+---
+# hostNetwork pods report the node IP as their pod IP, so a normal selector
+# Service resolves to 10.5.0.2:8088. The webapp fetches /vpn/configs via
+# Traefik.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wg-gateway
+  namespace: pigeon-system
+spec:
+  selector:
+    app: wg-gateway
+  ports:
+    - name: http
+      port: 8088
+      targetPort: 8088
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wg-gateway
+  namespace: pigeon-system
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: pigeon.localhost
+      http:
+        paths:
+          - path: /vpn
+            pathType: Prefix
+            backend:
+              service:
+                name: wg-gateway
+                port:
+                  number: 8088

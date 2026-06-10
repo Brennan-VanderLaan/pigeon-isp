@@ -82,6 +82,11 @@
     .verdicts { font-size: 11px; max-height: 110px; overflow-y: auto; }
     .verdicts .v-hit { color: #b98aff; }
     .verdicts .v-miss { color: var(--dim); }
+    .vpn-cfg {
+      background: #0c1118; border: 1px solid var(--edge); border-radius: 6px;
+      padding: 8px 10px; font-size: 11px; color: var(--dim); white-space: pre;
+      overflow-x: auto; margin: 8px 0 0;
+    }
     #filtercfg .route {
       margin-top: 10px; padding: 6px 8px; border: 1px solid var(--edge);
       border-radius: 6px; background: #131a26; color: var(--accent); font-size: 12px;
@@ -142,10 +147,12 @@
   <div id="views" class="panel">
     <button data-view="factory" class="active">Factory</button>
     <button data-view="hosts">Hosts</button>
+    <button data-view="vpn">VPN</button>
     <button data-view="speedtest">Speedtest</button>
     <button data-view="health">Health</button>
   </div>
   <div id="hosts" class="fullpanel"></div>
+  <div id="vpn" class="fullpanel"></div>
   <div id="speedtest" class="fullpanel"></div>
   <div id="health" class="fullpanel"></div>
   <div id="status" class="panel">

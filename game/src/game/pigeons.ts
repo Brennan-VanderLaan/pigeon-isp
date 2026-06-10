@@ -94,13 +94,14 @@ export class Pigeon {
       this.state = 'riding';
     }
 
-    this.progress += dt * BASE_SPEED * speedMult;
-    let steps = 0;
+    // Advance, but never travel more than MAX_STEPS_PER_TICK CELLS in one
+    // tick — and cap the INCREMENT itself rather than zeroing progress, so we
+    // never skip a cell or discard sub-cell position. Every integer of
+    // progress = one cell arrived-at-and-evaluated; nothing is stepped over.
+    let budget = dt * BASE_SPEED * speedMult;
+    if (budget > MAX_STEPS_PER_TICK) budget = MAX_STEPS_PER_TICK;
+    this.progress += budget;
     while (this.progress >= 1) {
-      if (++steps > MAX_STEPS_PER_TICK) {
-        this.progress = 0;
-        break;
-      }
       this.progress -= 1;
       this.col = this.toCell!.col;
       this.row = this.toCell!.row;

@@ -21,6 +21,7 @@ import { Hosts } from './ui/hosts';
 import { Hud, type Tool } from './ui/hud';
 import { Speedtest } from './ui/speedtest';
 import { PodTerminal, restoreTerminals } from './ui/terminal';
+import { Vpn } from './ui/vpn';
 import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
 
 const params = new URLSearchParams(location.search);
@@ -470,8 +471,10 @@ restoreTerminals();
 new Speedtest();
 const healthView = new Health();
 const hostsView = new Hosts();
+const vpnView = new Vpn();
 const viewPanels: Record<string, HTMLElement | null> = {
   hosts: document.getElementById('hosts'),
+  vpn: document.getElementById('vpn'),
   speedtest: document.getElementById('speedtest'),
   health: document.getElementById('health'),
 };
@@ -485,6 +488,7 @@ document.querySelectorAll<HTMLButtonElement>('#views button').forEach((btn) => {
     }
     if (view === 'health') healthView.show(); else healthView.hide();
     if (view === 'hosts') hostsView.show(); else hostsView.hide();
+    if (view === 'vpn') vpnView.show(); else vpnView.hide();
   });
 });
 

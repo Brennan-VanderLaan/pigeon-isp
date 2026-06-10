@@ -44,7 +44,7 @@ if ($existing) {
         --name $clusterName `
         --provisioner docker `
         --workers $Workers `
-        --exposed-ports "80:80/tcp,9777:9777/tcp" `
+        --exposed-ports "80:80/tcp,9777:9777/tcp,51820:51820/udp" `
         --config-patch "@$PSScriptRoot\talos-patch.yaml" `
         --wait=false
     if ($LASTEXITCODE -ne 0) { throw "talosctl cluster create failed" }
@@ -105,6 +105,9 @@ kubectl apply -f "$PSScriptRoot\manifests\infra\"
 kubectl apply -f "$PSScriptRoot\manifests\web\"
 kubectl -n pigeon-system create configmap tower-src --from-file="$tmp\tower-src.tgz" --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f "$PSScriptRoot\manifests\tower\"
+
+Write-Host "==> deploying the WireGuard VPN gateway" -ForegroundColor Cyan
+kubectl apply -f "$PSScriptRoot\manifests\vpn\"
 
 Write-Host "==> releasing the aviary (alice and bob)" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\aviary\"
