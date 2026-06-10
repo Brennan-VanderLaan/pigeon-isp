@@ -21,6 +21,7 @@ import { SimBridge } from './net/simbridge';
 import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
 import { Health } from './ui/health';
 import { Hosts } from './ui/hosts';
+import { Network } from './ui/network';
 import { Hud, type Tool } from './ui/hud';
 import { Speedtest } from './ui/speedtest';
 import { PodTerminal, restoreTerminals } from './ui/terminal';
@@ -506,9 +507,11 @@ restoreTerminals();
 new Speedtest();
 const healthView = new Health();
 const hostsView = new Hosts();
+const networkView = new Network(board);
 const vpnView = new Vpn();
 const viewPanels: Record<string, HTMLElement | null> = {
   hosts: document.getElementById('hosts'),
+  network: document.getElementById('network'),
   vpn: document.getElementById('vpn'),
   speedtest: document.getElementById('speedtest'),
   health: document.getElementById('health'),
@@ -523,6 +526,7 @@ document.querySelectorAll<HTMLButtonElement>('#views button').forEach((btn) => {
     }
     if (view === 'health') healthView.show(); else healthView.hide();
     if (view === 'hosts') hostsView.show(); else hostsView.hide();
+    if (view === 'network') networkView.show(); else networkView.hide();
     if (view === 'vpn') vpnView.show(); else vpnView.hide();
   });
 });

@@ -121,6 +121,23 @@ const SLOTS: PortLoc[] = (() => {
 
 const STORE_KEY = 'pigeon-isp-floor-v1';
 const SLOT_KEY = 'pigeon-isp-slots-v1'; // host identity -> perimeter slot, stable across reloads
+const SHELF_KEY = 'pigeon-isp-shelved-v1'; // hosts taken off the board
+const RULES_KEY = 'pigeon-isp-placement-v1'; // pattern -> slot zone for new hosts
+
+/** Placement rule: new hosts whose pod name contains `pattern` land in one of
+ *  `slots` — so VPN/sandbox hosts show up pre-wired in an area you set up. */
+export interface PlacementRule {
+  pattern: string;
+  slots: number[];
+}
+
+export interface HostInfo {
+  ident: string; // ns/pod
+  port: PortInfo;
+  present: boolean; // currently connected
+  shelved: boolean;
+  slot?: number;
+}
 
 const beltBase = new THREE.BoxGeometry(CELL * 0.94, 0.08, CELL * 0.94);
 const beltBaseMat = new THREE.MeshStandardMaterial({ color: 0x232c3a, roughness: 0.9 });
@@ -138,6 +155,11 @@ export class Board {
   private portLocs = new Map<number, PortLoc>();
   private usedSlots = new Set<number>();
   private slotByIdent = new Map<string, number>(); // "ns/pod" -> slot index (persisted)
+  private knownHosts = new Map<string, HostInfo>(); // ident -> host (present or shelved)
+  private idToIdent = new Map<number, string>(); // port id -> ident
+  private shelved = new Set<string>(); // idents kept off the board (persisted)
+  private placementRules: PlacementRule[] = []; // persisted
+  onHosts: () => void = () => {}; // fired when the inventory changes
   private appliances = new Map<number, Appliance>();
   private nextApplianceId = 1;
   private tables = new Map<string, NamedTable>(); // shared router state for primitives
@@ -172,7 +194,18 @@ export class Board {
     try {
       const raw = localStorage.getItem(SLOT_KEY);
       if (raw) this.slotByIdent = new Map(Object.entries(JSON.parse(raw)));
-    } catch { /* no saved slot map yet */ }
+      const sh = localStorage.getItem(SHELF_KEY);
+      if (sh) this.shelved = new Set(JSON.parse(sh));
+      const rl = localStorage.getItem(RULES_KEY);
+      if (rl) this.placementRules = JSON.parse(rl);
+    } catch { /* nothing saved yet */ }
+  }
+
+  private saveShelf(): void {
+    try { localStorage.setItem(SHELF_KEY, JSON.stringify([...this.shelved])); } catch { /* */ }
+  }
+  private saveRules(): void {
+    try { localStorage.setItem(RULES_KEY, JSON.stringify(this.placementRules)); } catch { /* */ }
   }
 
   private slotTaken(idx: number): boolean {
@@ -631,20 +664,17 @@ export class Board {
 
   addPort(port: PortInfo): void {
     if (this.portLocs.has(port.id)) return;
-    // Stable slot per HOST IDENTITY (pod name + namespace), persisted — so a
-    // host always lands on the same perimeter spot across reloads and your
-    // belt layout keeps pointing at the right place. Port ids are reassigned
-    // every session and must NOT be the key.
     const ident = `${port.namespace}/${port.pod}`;
-    let slotIdx = this.slotByIdent.get(ident);
-    if (slotIdx === undefined || this.usedSlots.has(slotIdx)) {
-      slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i) && !this.slotTaken(i));
-      if (slotIdx < 0) slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i));
-      if (slotIdx < 0) slotIdx = 0;
-      this.slotByIdent.set(ident, slotIdx);
-      this.saveSlots();
-    }
+    this.idToIdent.set(port.id, ident);
+    this.knownHosts.set(ident, { ident, port, present: true, shelved: this.shelved.has(ident), slot: this.slotByIdent.get(ident) });
+
+    // Shelved hosts are known but kept OFF the board — their frames have no
+    // roost, so the consumer drops them (the host is unplugged from the floor).
+    if (this.shelved.has(ident)) { this.onHosts(); return; }
+
+    const slotIdx = this.pickSlot(ident, port.pod);
     this.usedSlots.add(slotIdx);
+    this.knownHosts.get(ident)!.slot = slotIdx;
     const slot = SLOTS[slotIdx];
 
     // Building over the slot? The host wins; the machine is scrap.
@@ -662,12 +692,79 @@ export class Board {
     this.cells.set(key(slot.landing.col, slot.landing.row), { type: 'landing', port, mesh: landingMesh });
 
     this.portLocs.set(port.id, { roost: { ...slot.roost }, landing: { ...slot.landing }, facing: slot.facing });
+    this.onHosts();
   }
 
-  removePort(id: number): void {
-    const loc = this.portLocs.get(id);
-    if (!loc) return;
-    this.portLocs.delete(id);
+  /** Choose a perimeter slot for a host: its remembered slot, else a slot
+   *  from the first matching placement rule's zone, else the lowest free. */
+  private pickSlot(ident: string, pod: string): number {
+    const saved = this.slotByIdent.get(ident);
+    if (saved !== undefined && !this.usedSlots.has(saved)) return saved;
+
+    const free = (i: number) => !this.usedSlots.has(i) && !this.slotTaken(i);
+    let slotIdx = -1;
+    const rule = this.placementRules.find((r) => r.pattern && pod.includes(r.pattern));
+    if (rule) slotIdx = rule.slots.find((s) => s >= 0 && s < SLOTS.length && free(s)) ?? -1;
+    if (slotIdx < 0) slotIdx = SLOTS.findIndex((_, i) => free(i));
+    if (slotIdx < 0) slotIdx = SLOTS.findIndex((_, i) => !this.usedSlots.has(i));
+    if (slotIdx < 0) slotIdx = 0;
+    this.slotByIdent.set(ident, slotIdx);
+    this.saveSlots();
+    return slotIdx;
+  }
+
+  // ---- host inventory: shelve / zones ------------------------------------------
+
+  hostInventory(): HostInfo[] {
+    return [...this.knownHosts.values()].sort((a, b) => a.ident.localeCompare(b.ident));
+  }
+
+  getPlacementRules(): PlacementRule[] {
+    return this.placementRules.map((r) => ({ pattern: r.pattern, slots: [...r.slots] }));
+  }
+
+  setPlacementRules(rules: PlacementRule[]): void {
+    this.placementRules = rules;
+    this.saveRules();
+  }
+
+  slotCount(): number {
+    return SLOTS.length;
+  }
+
+  /** Take a host off the board (its traffic is then dropped). */
+  shelveHost(ident: string): void {
+    this.shelved.add(ident);
+    this.saveShelf();
+    const h = this.knownHosts.get(ident);
+    if (h) {
+      h.shelved = true;
+      // Remove its roost/landing if currently placed.
+      for (const [id, loc] of this.portLocs) {
+        if (this.idToIdent.get(id) === ident) { this.removePortVisuals(id, loc); break; }
+      }
+    }
+    this.onHosts();
+  }
+
+  /** Put a shelved host back on the board (re-placed when present). */
+  unshelveHost(ident: string): void {
+    this.shelved.delete(ident);
+    this.saveShelf();
+    const h = this.knownHosts.get(ident);
+    if (h) {
+      h.shelved = false;
+      if (h.present && !this.hasPlacedPort(ident)) this.addPort(h.port); // re-place now
+    }
+    this.onHosts();
+  }
+
+  private hasPlacedPort(ident: string): boolean {
+    for (const id of this.portLocs.keys()) if (this.idToIdent.get(id) === ident) return true;
+    return false;
+  }
+
+  private removePortVisuals(id: number, loc: PortLoc): void {
     for (const cellLoc of [loc.roost, loc.landing]) {
       const cell = this.cells.get(key(cellLoc.col, cellLoc.row));
       if (cell?.type === 'roost' || cell?.type === 'landing') {
@@ -675,8 +772,21 @@ export class Board {
         this.cells.delete(key(cellLoc.col, cellLoc.row));
       }
     }
+    this.portLocs.delete(id);
     const slotIdx = SLOTS.findIndex((s) => s.roost.col === loc.roost.col && s.roost.row === loc.roost.row);
     if (slotIdx >= 0) this.usedSlots.delete(slotIdx);
+  }
+
+  removePort(id: number): void {
+    const ident = this.idToIdent.get(id);
+    if (ident) {
+      const h = this.knownHosts.get(ident);
+      if (h) h.present = false; // keep it in the inventory as "offline"
+    }
+    this.idToIdent.delete(id);
+    const loc = this.portLocs.get(id);
+    if (loc) this.removePortVisuals(id, loc);
+    this.onHosts();
   }
 
   portLoc(portId: number): PortLoc | undefined {
