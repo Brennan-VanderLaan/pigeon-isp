@@ -1,0 +1,20 @@
+# App-of-apps root. up.ps1 substitutes __REPO_URL__ with -GitRepo and applies
+# this; ArgoCD then owns everything under gitops/apps/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pigeon-root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: HEAD
+    path: gitops/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

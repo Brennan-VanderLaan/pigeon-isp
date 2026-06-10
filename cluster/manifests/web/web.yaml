@@ -1,0 +1,93 @@
+# The game, served FROM the cluster. Same no-registry trick as the loft: an
+# init container builds the web app from the game-src ConfigMap tarball, nginx
+# serves the dist. Traefik routes pigeon.localhost here, and /ws straight to
+# loftd — so the game and its bridge are same-origin.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: game-web
+  namespace: pigeon-system
+  labels:
+    app: game-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: game-web
+  template:
+    metadata:
+      labels:
+        app: game-web
+    spec:
+      initContainers:
+        - name: build
+          image: node:20-alpine
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /build
+              tar xzf /src/game-src.tgz -C /build
+              cd /build
+              npm install --no-audit --no-fund
+              npm run build
+              cp -r dist/* /out/
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: dist
+              mountPath: /out
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: dist
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+      volumes:
+        - name: src
+          configMap:
+            name: game-src
+        - name: dist
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-web
+  namespace: pigeon-system
+spec:
+  selector:
+    app: game-web
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pigeon
+  namespace: pigeon-system
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: pigeon.localhost
+      http:
+        paths:
+          - path: /ws
+            pathType: Exact
+            backend:
+              service:
+                name: loft
+                port:
+                  number: 9777
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: game-web
+                port:
+                  number: 80

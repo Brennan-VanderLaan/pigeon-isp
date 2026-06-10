@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pigeon-system
+  labels:
+    # The loft is everything PodSecurity baseline forbids: privileged,
+    # hostNetwork, hostPath. It's a data plane; that's the job.
+    pod-security.kubernetes.io/enforce: privileged

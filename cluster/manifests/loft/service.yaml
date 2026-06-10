@@ -1,0 +1,16 @@
+# loftd runs hostNetwork on every node, but only the worker hosts aviary pods.
+# internalTrafficPolicy Local means Traefik (also on the worker) always lands
+# on the worker's loft, not the control plane's empty one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loft
+  namespace: pigeon-system
+spec:
+  selector:
+    app: loft
+  internalTrafficPolicy: Local
+  ports:
+    - name: ws
+      port: 9777
+      targetPort: 9777

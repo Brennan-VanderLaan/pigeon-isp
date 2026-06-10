@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pigeon ISP — build a router, for real</title>
+  <style>
+    :root {
+      --panel: rgba(18, 22, 30, 0.92);
+      --edge: #2c3442;
+      --text: #cfd8e3;
+      --dim: #7b8794;
+      --accent: #ffb347;
+      --good: #6fdc8c;
+      --bad: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e13; }
+    body { font: 13px/1.45 'Cascadia Code', 'Consolas', monospace; color: var(--text); }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; }
+
+    .panel {
+      position: fixed; background: var(--panel); border: 1px solid var(--edge);
+      border-radius: 8px; padding: 10px 12px; pointer-events: auto;
+    }
+    #status { top: 10px; left: 10px; display: flex; gap: 14px; align-items: center; }
+    #status .mode { font-weight: bold; }
+    #status .mode.live { color: var(--good); }
+    #status .mode.sim { color: var(--accent); }
+    #status .mode.down { color: var(--bad); }
+
+    #inspector { top: 10px; right: 10px; width: 340px; max-height: 70vh; overflow-y: auto; display: none; }
+    #inspector h3 { margin: 0 0 6px; color: var(--accent); font-size: 13px; }
+    #inspector table { width: 100%; border-collapse: collapse; }
+    #inspector td { padding: 1px 4px; vertical-align: top; }
+    #inspector td:first-child { color: var(--dim); white-space: nowrap; }
+    #inspector .hex { margin-top: 8px; color: var(--dim); font-size: 11px; white-space: pre; }
+
+    #console {
+      bottom: 64px; left: 10px; width: 480px; height: 180px; overflow-y: auto;
+      font-size: 12px;
+    }
+    #console .line { white-space: pre-wrap; }
+    #console .line .who { color: var(--accent); }
+
+    #toolbar { bottom: 10px; left: 10px; display: flex; gap: 8px; align-items: center; }
+    #toolbar button {
+      background: #1a2230; color: var(--text); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+    }
+    #toolbar button.active { border-color: var(--accent); color: var(--accent); }
+    #toolbar .hint { color: var(--dim); margin-left: 6px; }
+
+    #banner {
+      top: 10px; left: 50%; transform: translateX(-50%);
+      color: var(--accent); display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="status" class="panel">
+    <span class="mode" id="mode">connecting…</span>
+    <span id="stat-ports">ports: 0</span>
+    <span id="stat-rate">in: 0 pps</span>
+    <span id="stat-pigeons">pigeons: 0</span>
+    <span id="stat-drops">drops: 0</span>
+    <span id="stat-decide" style="display:none">decide: —</span>
+    <span id="stat-fps">fps: —</span>
+  </div>
+  <div id="banner" class="panel"></div>
+  <div id="inspector" class="panel"></div>
+  <div id="console" class="panel"></div>
+  <div id="toolbar" class="panel">
+    <button id="tool-select" data-tool="select">1 select</button>
+    <button id="tool-belt" data-tool="belt">2 belt</button>
+    <button id="tool-erase" data-tool="erase">3 erase</button>
+    <span class="hint">R rotate · drag to paint · click a pigeon to inspect</span>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

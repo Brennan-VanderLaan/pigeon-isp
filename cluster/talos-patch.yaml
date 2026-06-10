@@ -1,0 +1,12 @@
+# Applied to every node at `talosctl cluster create` time.
+# cni: none is the whole trick — Talos brings up Kubernetes with NO pod
+# network, and the loft DaemonSet installs pigeon-cni instead.
+cluster:
+  # Single-node cluster: docker provisioner only publishes ports on the init
+  # node, so everything (traefik, loftd, aviary pods) lives there.
+  allowSchedulingOnControlPlanes: true
+  network:
+    cni:
+      name: none
+    podSubnets:
+      - 10.244.0.0/16

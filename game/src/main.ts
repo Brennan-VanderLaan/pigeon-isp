@@ -1,0 +1,259 @@
+// Pigeon ISP — wire-up. Picks a bridge (live loft, or sim with fake pods),
+// builds the world, routes input.
+//
+//   ?sim=1          force sim mode
+//   ?storm=2000     sim mode + UDP packet storm at N pps (client benchmark)
+//   ?bridge=ws://…  explicit loft URL
+//   ?autoroute=1    BENCHMARK MODE: no physics — the consumer becomes a
+//                   MAC-learning software switch and delivers every token
+//                   immediately. Measures the webapp's raw ceiling and its
+//                   per-frame decide time (docs/benchmarks.md).
+import { Board, makeGhostBelt, orientGhost } from './game/board';
+import { PigeonManager } from './game/pigeons';
+import { World } from './game/world';
+import { SimBridge } from './net/simbridge';
+import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
+import { Hud, type Tool } from './ui/hud';
+import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
+
+const params = new URLSearchParams(location.search);
+const stormPps = Number(params.get('storm') ?? 0);
+const forceSim = params.has('sim') || stormPps > 0;
+const autoroute = params.has('autoroute');
+
+const world = new World(document.getElementById('app')!);
+const board = new Board(world.scene);
+const hud = new Hud();
+
+let bridge: Bridge;
+const portsById = new Map<number, PortInfo>();
+let totalDrops = 0;
+let lastRxTotal = 0;
+let currentPps = 0;
+let tokensThisSecond = 0;
+let bytesThisSecond = 0;
+
+// Autoroute benchmark state: a MAC table and decide-time accounting.
+const macTable = new Map<string, number>(); // "aa:bb:…" -> portId
+let decideUsSum = 0;
+let decideCount = 0;
+
+function macKey(b: Uint8Array, off: number): string {
+  let s = '';
+  for (let i = 0; i < 6; i++) s += b[off + i].toString(16).padStart(2, '0');
+  return s;
+}
+
+/** The consumer-as-software-switch: learn src, forward by dst, flood
+ *  broadcast/unknown to the other port. No physics, just the API. */
+function autorouteToken(token: FrameToken): void {
+  const t0 = performance.now();
+  const b = token.snapshot;
+  if (b.length >= 14) {
+    macTable.set(macKey(b, 6), token.port);
+    const dstPort = macTable.get(macKey(b, 0));
+    if (dstPort !== undefined && dstPort !== token.port) {
+      bridge.deliver(dstPort, token.id);
+    } else {
+      // broadcast or unknown dst: copy-deliver to every other port, then free.
+      let copies = 0;
+      for (const id of portsById.keys()) {
+        if (id !== token.port) {
+          bridge.copyDeliver(id, token.id);
+          copies++;
+        }
+      }
+      bridge.drop(token.id);
+      if (copies === 0) { /* nowhere to go: counted as consumer drop */ }
+    }
+  } else {
+    bridge.drop(token.id);
+  }
+  decideUsSum += (performance.now() - t0) * 1000;
+  decideCount++;
+}
+
+const pigeons = new PigeonManager(
+  world.scene,
+  board,
+  () => bridge,
+  (pigeon, portId) => {
+    hud.log('loft', `delivered: ${pigeon.decoded.summary} → port ${portId}`);
+  },
+);
+
+const events: BridgeEvents = {
+  onHello(ports: PortInfo[]) {
+    portsById.clear();
+    for (const p of ports) {
+      portsById.set(p.id, p);
+      board.addPort(p);
+    }
+    hud.log('loft', `hello: ${ports.length} port(s) roosting`);
+  },
+  onPortAdded(port) {
+    portsById.set(port.id, port);
+    board.addPort(port);
+    hud.log('loft', `port up: ${port.namespace}/${port.pod} ${port.ip} (${port.mac})`);
+  },
+  onPortRemoved(id) {
+    portsById.delete(id);
+    board.removePort(id);
+    hud.log('loft', `port down: ${id}`);
+  },
+  onToken(token: FrameToken) {
+    tokensThisSecond++;
+    bytesThisSecond += token.fullLen;
+    if (autoroute) autorouteToken(token);
+    else pigeons.spawn(token);
+  },
+  onStats(stats: LoftStats) {
+    let rxTotal = 0;
+    let drops = stats.droppedNoConsumer;
+    for (const s of Object.values(stats.ports)) {
+      rxTotal += s.rxFrames;
+      drops += s.drops.overflow + s.drops.ttl + s.drops.consumer;
+    }
+    currentPps = Math.max(0, rxTotal - lastRxTotal);
+    lastRxTotal = rxTotal;
+    totalDrops = drops + pigeons.droppedByMe;
+  },
+  onLog(who, line) {
+    hud.log(who, line);
+  },
+  onState(state) {
+    hud.setMode(state);
+    if (state === 'down' && !triedSim) {
+      triedSim = true;
+      hud.setBanner('loft unreachable — falling back to sim mode (?sim=1 to skip the wait)');
+      startSim();
+    }
+  },
+};
+
+let triedSim = false;
+function startSim(): void {
+  const sim = new SimBridge(events, stormPps);
+  bridge = sim;
+  sim.start();
+}
+
+if (forceSim) {
+  triedSim = true;
+  startSim();
+} else {
+  const ws = new WsBridge(defaultBridgeUrl(), events);
+  bridge = ws;
+  ws.connect();
+}
+
+// ---- input ------------------------------------------------------------------
+
+let tool: Tool = 'belt';
+let beltDir = 0;
+let painting = false;
+let erasing = false;
+const ghost = makeGhostBelt();
+ghost.visible = false;
+world.scene.add(ghost);
+
+hud.onToolChange = (t) => {
+  tool = t;
+  ghost.visible = tool === 'belt';
+};
+hud.setTool('belt');
+
+function paintAtPointer(): void {
+  const hit = world.pickGround();
+  if (!hit) return;
+  const cell = board.worldToCell(hit);
+  if (!cell) return;
+  if (tool === 'belt' && painting) board.setBelt(cell.col, cell.row, beltDir);
+  if (tool === 'erase' && erasing) board.eraseBelt(cell.col, cell.row);
+}
+
+window.addEventListener('pointermove', (e) => {
+  world.setPointer(e.clientX, e.clientY);
+  const hit = world.pickGround();
+  if (hit && tool === 'belt') {
+    const cell = board.worldToCell(hit);
+    if (cell) {
+      ghost.visible = true;
+      ghost.position.copy(board.cellToWorld(cell.col, cell.row, 0.05));
+      orientGhost(ghost, beltDir);
+    } else {
+      ghost.visible = false;
+    }
+  }
+  paintAtPointer();
+});
+
+window.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  if ((e.target as HTMLElement).closest('.panel')) return;
+  world.setPointer(e.clientX, e.clientY);
+
+  if (tool === 'select') {
+    const hit = world.pickObjects(pigeons.pickablesByMesh());
+    let obj = hit?.object ?? null;
+    while (obj && !obj.userData.pigeon) obj = obj.parent;
+    if (obj?.userData.pigeon) {
+      const p = obj.userData.pigeon;
+      hud.inspect(p.decoded, p.token);
+    } else {
+      hud.closeInspector();
+    }
+    return;
+  }
+  painting = tool === 'belt';
+  erasing = tool === 'erase';
+  paintAtPointer();
+});
+
+window.addEventListener('pointerup', () => {
+  painting = false;
+  erasing = false;
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === '1') hud.setTool('select');
+  if (e.key === '2') hud.setTool('belt');
+  if (e.key === '3') hud.setTool('erase');
+  if (e.key === 'r' || e.key === 'R') {
+    beltDir = (beltDir + 1) % 4;
+    orientGhost(ghost, beltDir);
+  }
+  if (e.key === 'Escape') hud.closeInspector();
+});
+
+// ---- loop -------------------------------------------------------------------
+
+let last = performance.now();
+let fpsCount = 0;
+let fpsWindow = performance.now();
+
+function frame(now: number): void {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  pigeons.update(dt);
+  world.render();
+
+  fpsCount++;
+  if (now - fpsWindow >= 1000) {
+    hud.setFps(fpsCount);
+    const mbps = (bytesThisSecond * 8) / 1e6;
+    const decideUs = decideCount > 0 ? decideUsSum / decideCount : null;
+    hud.setStats(portsById.size, currentPps || tokensThisSecond, mbps, pigeons.pigeons.length, totalDrops, decideUs);
+    tokensThisSecond = 0;
+    bytesThisSecond = 0;
+    decideUsSum = 0;
+    decideCount = 0;
+    fpsCount = 0;
+    fpsWindow = now;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+hud.log('pigeon-isp', 'welcome to the loft. paint belts (2), rotate with R, route the pigeons.');

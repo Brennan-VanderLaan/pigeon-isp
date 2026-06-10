@@ -1,0 +1,36 @@
+# Benchmark inhabitants: an iperf3 pair in the aviary. Their traffic only
+# moves if a consumer routes it — run the game with ?autoroute=1 to measure
+# the webapp's ceiling, or play it manually if you enjoy suffering.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench-server
+  namespace: aviary
+  labels:
+    app: pigeon-bench
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      args: ["-s"]
+      securityContext:
+        capabilities:
+          add: ["NET_RAW"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench-client
+  namespace: aviary
+  labels:
+    app: pigeon-bench
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      command: ["/bin/sh", "-c", "sleep 2147483647"]
+      securityContext:
+        capabilities:
+          add: ["NET_RAW"]

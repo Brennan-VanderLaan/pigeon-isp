@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tgz
+bridge/loftd
+bridge/pigeon-cni
+bridge/cmd/loftd/loftd
+bridge/cmd/pigeon-cni/pigeon-cni
+.vite/

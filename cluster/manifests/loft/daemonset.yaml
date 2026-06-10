@@ -1,0 +1,121 @@
+# The loft: one pod per node that
+#   1. preps the node's infra network (cni0 bridge + NAT + host-gw routes) so
+#      ArgoCD/Traefik/CoreDNS/web have a network that always works,
+#   2. compiles loftd + pigeon-cni from the loft-src ConfigMap (no registry,
+#      no image build — the cluster is ephemeral, the source is the artifact),
+#   3. installs pigeon-cni onto the host so kubelet can wire pods,
+#   4. runs loftd, the buffered-token <-> WebSocket game data plane.
+#
+# Talos notes: /opt/cni/bin and /etc/cni/net.d are the standard writable CNI
+# paths. Tolerate everything — this pod must run while the node is still
+# NotReady, because it is the thing that MAKES the node Ready.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loft
+  namespace: pigeon-system
+  labels:
+    app: loft
+spec:
+  selector:
+    matchLabels:
+      app: loft
+  template:
+    metadata:
+      labels:
+        app: loft
+    spec:
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: loft
+          image: golang:1.24-alpine
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: GOMODCACHE
+              value: /gocache
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              apk add --no-cache iproute2 iptables >/dev/null
+
+              echo "prepping node infra network (node ip: $NODE_IP)..."
+              X=${NODE_IP##*.}
+              SUBNET="10.244.$X.0/24"
+              GW="10.244.$X.1"
+              ip link add cni0 type bridge 2>/dev/null || true
+              ip addr replace "$GW/24" dev cni0
+              ip link set cni0 up
+              sysctl -w net.ipv4.ip_forward=1
+              sysctl -w net.bridge.bridge-nf-call-iptables=1 || true
+              iptables -t nat -C POSTROUTING -s "$SUBNET" ! -d 10.244.0.0/16 -j MASQUERADE 2>/dev/null \
+                || iptables -t nat -A POSTROUTING -s "$SUBNET" ! -d 10.244.0.0/16 -j MASQUERADE
+              iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -A FORWARD -j ACCEPT
+              # host-gw routes to sibling nodes (talos docker net is 10.5.0.0/24,
+              # nodes are .2, .3, ...). Routes to absent nodes are harmless.
+              NET=${NODE_IP%.*}
+              for i in 2 3 4 5 6; do
+                [ "$i" = "$X" ] && continue
+                ip route replace "10.244.$i.0/24" via "$NET.$i" 2>/dev/null || true
+              done
+              mkdir -p /run/pigeon/ports
+              printf '{"bridgeSubnet":"%s","bridgeGW":"%s"}' "$SUBNET" "$GW" > /run/pigeon/node.json
+
+              echo "building the loft..."
+              mkdir -p /build /out
+              tar xzf /src/loft-src.tgz -C /build
+              cd /build
+              CGO_ENABLED=0 go build -o /out/ ./...
+
+              echo "installing pigeon-cni on the host..."
+              cp /out/pigeon-cni /host-cni-bin/.pigeon-cni.tmp
+              mv /host-cni-bin/.pigeon-cni.tmp /host-cni-bin/pigeon-cni
+              cat > /host-cni-conf/10-pigeon.conflist <<'EOF'
+              {
+                "cniVersion": "1.0.0",
+                "name": "pigeon",
+                "plugins": [
+                  { "type": "pigeon-cni" }
+                ]
+              }
+              EOF
+
+              echo "opening the loft"
+              exec /out/loftd -listen :9777 -ports-dir /run/pigeon/ports
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+            - name: cni-bin
+              mountPath: /host-cni-bin
+            - name: cni-conf
+              mountPath: /host-cni-conf
+            - name: pigeon-state
+              mountPath: /run/pigeon
+            - name: gocache
+              mountPath: /gocache
+      volumes:
+        - name: src
+          configMap:
+            name: loft-src
+        - name: cni-bin
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: cni-conf
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
+        - name: pigeon-state
+          hostPath:
+            path: /run/pigeon
+            type: DirectoryOrCreate
+        - name: gocache
+          emptyDir: {}
