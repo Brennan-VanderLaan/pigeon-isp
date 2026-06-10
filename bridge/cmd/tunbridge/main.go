@@ -29,24 +29,62 @@ import (
 
 func main() {
 	gateway := flag.String("gateway", "10.5.0.2:9777", "loft gateway host:port")
-	dev := flag.String("dev", "pigeonvpn", "TUN device name to create")
-	gwIP := flag.String("gw-ip", "10.99.0.199", "gateway IP on the TUN")
-	pool := flag.String("pool", "10.99.0.192/27", "client address pool routed into the TUN")
+	dev := flag.String("dev", "pigeonvpn", "TUN device name to create (TUN mode)")
+	gwIP := flag.String("gw-ip", "10.99.0.199", "gateway IP on the TUN (TUN mode)")
+	pool := flag.String("pool", "10.99.0.192/27", "client address pool routed into the TUN (TUN mode)")
+	attach := flag.String("attach", "", "attach to an EXISTING L3 interface via AF_PACKET (e.g. ipsec0) instead of making a TUN — for XFRM/IPsec")
 	flag.Parse()
 
-	fd, err := openTun(*dev)
-	if err != nil {
-		log.Fatalf("create tun %s: %v (need /dev/net/tun + NET_ADMIN)", *dev, err)
-	}
-	if err := configureTun(*dev, *gwIP, *pool); err != nil {
-		log.Fatalf("configure tun: %v", err)
-	}
-	log.Printf("tunbridge: %s up, gw %s, pool %s -> loft %s", *dev, *gwIP, *pool, *gateway)
+	b := &bridge{loftURL: "ws://" + *gateway + "/port", hosts: map[string]*bridgeHost{}}
 
-	b := &bridge{loftURL: "ws://" + *gateway + "/port", tunFd: fd, hosts: map[string]*bridgeHost{}}
-	go b.readTun()
+	if *attach != "" {
+		// XFRM/IKEv2 path: read decrypted client packets off an existing
+		// (ARPHRD_NONE) interface; writing back triggers ESP encryption.
+		fd, ifindex, err := attachPacket(*attach)
+		if err != nil {
+			log.Fatalf("attach %s: %v (need NET_RAW; does the interface exist?)", *attach, err)
+		}
+		b.pktFd = fd
+		b.ifindex = ifindex
+		b.attached = true
+		log.Printf("tunbridge: attached to %s (ifindex %d) -> loft %s", *attach, ifindex, *gateway)
+	} else {
+		fd, err := openTun(*dev)
+		if err != nil {
+			log.Fatalf("create tun %s: %v (need /dev/net/tun + NET_ADMIN)", *dev, err)
+		}
+		if err := configureTun(*dev, *gwIP, *pool); err != nil {
+			log.Fatalf("configure tun: %v", err)
+		}
+		b.tunFd = fd
+		log.Printf("tunbridge: %s up, gw %s, pool %s -> loft %s", *dev, *gwIP, *pool, *gateway)
+	}
+
+	go b.readPackets()
 	select {} // run forever
 }
+
+// attachPacket opens an AF_PACKET socket on an existing interface for raw L3
+// (IP) packets — used to tap an XFRM interface where strongSwan lands
+// decrypted client traffic.
+func attachPacket(name string) (fd, ifindex int, err error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return -1, 0, err
+	}
+	fd, err = unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, int(htons(unix.ETH_P_IP)))
+	if err != nil {
+		return -1, 0, err
+	}
+	sll := &unix.SockaddrLinklayer{Protocol: htons(unix.ETH_P_IP), Ifindex: iface.Index}
+	if err := unix.Bind(fd, sll); err != nil {
+		unix.Close(fd)
+		return -1, 0, err
+	}
+	return fd, iface.Index, nil
+}
+
+func htons(v uint16) uint16 { return v<<8 | v>>8 }
 
 // ---- TUN device -------------------------------------------------------------
 
@@ -86,20 +124,36 @@ func configureTun(name, gwIP, pool string) error {
 // ---- bridge -----------------------------------------------------------------
 
 type bridge struct {
-	loftURL string
-	tunFd   int
-	mu      sync.Mutex
-	hosts   map[string]*bridgeHost // client IP -> host
+	loftURL  string
+	tunFd    int
+	pktFd    int
+	ifindex  int
+	attached bool
+	mu       sync.Mutex
+	hosts    map[string]*bridgeHost // client IP -> host
 }
 
-func (b *bridge) writeTun(ippkt []byte) {
+// writeOut sends a decrypted IP packet back toward its client — to the TUN,
+// or (attach mode) onto the XFRM interface where the kernel ESP-encrypts it.
+func (b *bridge) writeOut(ippkt []byte) {
+	if b.attached {
+		sll := &unix.SockaddrLinklayer{Protocol: htons(unix.ETH_P_IP), Ifindex: b.ifindex}
+		unix.Sendto(b.pktFd, ippkt, 0, sll)
+		return
+	}
 	unix.Write(b.tunFd, ippkt)
 }
 
-func (b *bridge) readTun() {
+func (b *bridge) readPackets() {
 	buf := make([]byte, 65536)
 	for {
-		n, err := unix.Read(b.tunFd, buf)
+		var n int
+		var err error
+		if b.attached {
+			n, _, err = unix.Recvfrom(b.pktFd, buf, 0)
+		} else {
+			n, err = unix.Read(b.tunFd, buf)
+		}
 		if err != nil || n < 20 {
 			continue
 		}
@@ -200,7 +254,7 @@ func (h *bridgeHost) fromAviary(b []byte) {
 		h.onARP(b)
 	case 0x0800:
 		if len(b) >= 34 && net.IP(b[30:34]).Equal(h.ip) {
-			h.b.writeTun(b[14:]) // strip ethernet, hand the IP packet to the TUN -> VPN -> client
+			h.b.writeOut(b[14:]) // strip ethernet, send the IP packet toward the client
 		}
 	}
 }

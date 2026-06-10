@@ -101,19 +101,19 @@ What works (verified in-cluster):
   (10.99.0.192/27), and the `pigeon` IKEv2 connection. `swanctl --list-conns`
   shows it ready, presenting a proper cert chain — the IKE responder is up.
 
-What's NOT wired yet — the **XFRM data plane**. This image ships only
-`kernel-netlink` (kernel XFRM), **not** `kernel-libipsec`, so decrypted client
-traffic does NOT land on a TUN — the kernel routes it via XFRM policy. So the
-TUN-reading `tunbridge` doesn't see it yet. The remaining work to carry client
-traffic onto the loft:
-1. Give the connection an `if_id_in/if_id_out` and create an **XFRM interface**
-   (`ip link add ipsec0 type xfrm if_id <n>`) in the charon container.
-2. Teach `tunbridge` an attach mode that reads that interface via AF_PACKET
-   (SOCK_DGRAM, raw IP) instead of creating a TUN — the per-source-IP bridging
-   logic is unchanged.
-3. Route the client pool through `ipsec0`.
+The **XFRM data plane** is now wired (this image ships `kernel-netlink`, not
+`kernel-libipsec`, so decrypted traffic is kernel-routed, not TUN'd):
+- The connection carries `if_id_in/if_id_out = 42`.
+- The charon container creates an **XFRM interface** `ipsec0` (`ip link add
+  ipsec0 type xfrm if_id 42`), brings it up, and routes the client pool
+  (10.99.0.192/27) through it. Verified up in-cluster.
+- `tunbridge -attach ipsec0` taps it via AF_PACKET (SOCK_DGRAM, raw IP):
+  decrypted client packets are read off `ipsec0` and bridged onto the loft as
+  per-client virtual hosts; replies are written back onto `ipsec0`, where the
+  kernel ESP-encrypts them to the client. Same per-source-IP bridging as the
+  TUN/WireGuard paths.
 
-Testing checklist (once the data plane is wired, needs a real device):
+Testing checklist (needs a real device to drive the handshake):
 1. charon up + `swanctl --list-conns` shows `pigeon` (done).
 2. Connect a phone (IKEv2, server = published host, remote id pigeon.localhost,
    EAP user `pigeon` / pass `pigeon-vpn`, trust the CA); `swanctl --list-sas`

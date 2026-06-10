@@ -45,6 +45,10 @@ data:
           pigeon {
             local_ts = 0.0.0.0/0
             esp_proposals = aes256-sha256,default
+            # Bind this SA to the ipsec0 XFRM interface so decrypted client
+            # traffic lands there for tunbridge to pick up.
+            if_id_in = 42
+            if_id_out = 42
           }
         }
       }
@@ -116,6 +120,15 @@ spec:
                   --flag serverAuth --outform pem > /etc/swanctl/x509/server.crt
               echo "=== server cert ==="; "$PKI" --print --in /etc/swanctl/x509/server.crt | head -8
 
+              # XFRM interface ipsec0 (if_id 42) — decrypted client traffic
+              # lands here; the route makes the kernel send replies back
+              # through it (ESP-encrypt). tunbridge taps it.
+              ip link add ipsec0 type xfrm if_id 42 2>/dev/null \
+                || ip link add ipsec0 type xfrm dev lo if_id 42 2>/dev/null || true
+              ip link set ipsec0 up 2>/dev/null || true
+              ip route add 10.99.0.192/27 dev ipsec0 2>/dev/null || true
+              echo "=== ipsec0 ==="; ip addr show ipsec0 2>/dev/null || echo "no ipsec0 (xfrm unsupported?)"
+
               # Locate the charon daemon (path varies: libexec vs lib).
               CHARON=$(ls /usr/libexec/ipsec/charon /usr/lib/ipsec/charon /usr/sbin/charon 2>/dev/null | head -1)
               echo "charon: $CHARON"
@@ -123,7 +136,6 @@ spec:
               for i in $(seq 1 30); do [ -S /var/run/charon.vici ] && break; sleep 1; done
               swanctl --load-all
               echo "=== loaded connections ==="; swanctl --list-conns
-              echo "=== links ==="; ip link 2>/dev/null || true
               wait
           volumeMounts:
             - name: conf
@@ -144,9 +156,10 @@ spec:
               tar xzf /src/loft-src.tgz -C /build
               cd /build
               CGO_ENABLED=0 go build -o /out/tunbridge ./cmd/tunbridge
-              # wait for charon to create the libipsec TUN, then bridge it
-              sleep 8
-              exec /out/tunbridge -gateway 10.5.0.2:9777 -dev ipsec0 -gw-ip 10.99.0.198 -pool 10.99.0.192/27
+              # wait for the charon container to create the ipsec0 XFRM
+              # interface (sysfs check — no iproute2 in alpine), then attach.
+              for i in $(seq 1 40); do [ -d /sys/class/net/ipsec0 ] && break; sleep 2; done
+              exec /out/tunbridge -gateway 10.5.0.2:9777 -attach ipsec0
           volumeMounts:
             - name: src
               mountPath: /src
