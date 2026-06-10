@@ -29,6 +29,7 @@ function toPortInfo(p: WirePort): PortInfo {
 export class WsBridge implements Bridge {
   private ws: WebSocket | null = null;
   private closed = false;
+  private retryMs = 2000;
 
   constructor(private url: string, private events: BridgeEvents) {}
 
@@ -38,11 +39,18 @@ export class WsBridge implements Bridge {
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
-    ws.onopen = () => this.events.onState('live');
+    ws.onopen = () => {
+      this.retryMs = 2000;
+      this.events.onState('live');
+    };
     ws.onclose = () => {
       if (this.closed) return;
       this.events.onState('down');
-      setTimeout(() => !this.closed && this.connect(), 2000);
+      // Backoff (capped): if another router keeps bumping us, don't turn the
+      // loft into a two-consumer thrash fest.
+      const delay = this.retryMs;
+      this.retryMs = Math.min(this.retryMs * 1.6, 15000);
+      setTimeout(() => !this.closed && this.connect(), delay);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => {

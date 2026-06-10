@@ -124,16 +124,35 @@ const events: BridgeEvents = {
     hud.log(who, line);
   },
   onState(state) {
-    hud.setMode(state);
-    if (state === 'down' && !triedSim) {
+    if (state === 'live') {
+      everLive = true;
+      hud.setBanner(null);
+      hud.setMode('live');
+      return;
+    }
+    if (state === 'down') {
+      if (everLive || triedSim) {
+        // We had a real loft (or sim is already running): never fall back —
+        // another router may have bumped us, or the loft restarted. Keep
+        // reconnecting; latest router wins, and that can be us again.
+        hud.setMode('down');
+        hud.setBanner('loft connection lost — reconnecting… (another router may have taken over)');
+        return;
+      }
+      // Never connected at all: this machine probably has no cluster.
       triedSim = true;
+      wsBridge?.close();
       hud.setBanner('loft unreachable — falling back to sim mode (?sim=1 to skip the wait)');
       startSim();
+      return;
     }
+    hud.setMode(state);
   },
 };
 
 let triedSim = false;
+let everLive = false;
+let wsBridge: WsBridge | null = null;
 function startSim(): void {
   const sim = new SimBridge(events, stormPps);
   bridge = sim;
@@ -144,9 +163,9 @@ if (forceSim) {
   triedSim = true;
   startSim();
 } else {
-  const ws = new WsBridge(defaultBridgeUrl(), events);
-  bridge = ws;
-  ws.connect();
+  wsBridge = new WsBridge(defaultBridgeUrl(), events);
+  bridge = wsBridge;
+  wsBridge.connect();
 }
 
 // ---- input ------------------------------------------------------------------
