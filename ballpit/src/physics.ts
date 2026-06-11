@@ -85,6 +85,9 @@ export class Physics {
     return hits;
   }
 
+  bodyCount(): number { return this.world.bodies.len(); }
+  colliderCount(): number { return this.world.colliders.len(); }
+
   private resolve(handle: number): { kind: 'ball' | 'bin'; id: number } | null {
     const f = this.ballByCollider.get(handle);
     if (f !== undefined) return { kind: 'ball', id: f };

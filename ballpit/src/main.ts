@@ -20,6 +20,7 @@ import { Physics } from './physics';
 import { Arena, portColor } from './arena';
 import { Balls } from './balls';
 import { Build, type Tool } from './build';
+import { Perf } from './perf';
 
 const params = new URLSearchParams(location.search);
 const stormPps = Number(params.get('storm') ?? 0);
@@ -40,9 +41,11 @@ new Arena(view.scene, physics); // floor + walls (host I/O is placeable now)
 const balls = new Balls(view.scene, physics);
 view.scene.add(balls.mesh);
 const build = new Build(view.scene, physics);
+const perf = new Perf();
 
 const ports = new Map<number, PortInfo>();
 let state = 'connecting';
+let spawned = 0;
 let delivered = 0;
 let dropped = 0;
 let mismatched = 0; // balls landed in a bin, but caller had no record (already gone)
@@ -65,7 +68,9 @@ const events: BridgeEvents = {
     if (!nozzle) { bridge.drop(token.id); return; } // no dock placed for it: free it
     const d = decodeFrame(token.snapshot, token.fullLen);
     const color = KIND_COLORS[d.kind] ?? 0xffffff;
-    if (!balls.spawn(token.id, token.port, nozzle, color, performance.now())) {
+    if (balls.spawn(token.id, token.port, nozzle, color, performance.now())) {
+      spawned++;
+    } else {
       bridge.drop(token.id); // factory full — shed load, counted
       dropped++;
     }
@@ -148,9 +153,17 @@ window.addEventListener('keydown', (e) => {
 
 // ---- main loop --------------------------------------------------------------
 let lastHud = 0;
+let prevFrame = performance.now();
 function frame(now: number): void {
+  const dtMs = now - prevFrame;
+  prevFrame = now;
   controls.update();
+
+  const tp = performance.now();
+  balls.applyField((x, y, z) => build.fieldAt(x, y, z)); // conveyors push balls
   const hits = physics.step();
+  const physicsMs = performance.now() - tp;
+
   for (const [frameId, portId] of hits) {
     if (balls.catch(frameId)) {
       bridge.deliver(portId, frameId);
@@ -160,13 +173,22 @@ function frame(now: number): void {
       mismatched++;
     }
   }
-
-  balls.applyField((x, y, z) => build.fieldAt(x, y, z)); // conveyors push balls
   const expired = balls.sync(now);
   for (const id of expired) { bridge.drop(id); dropped++; }
 
-  if (now - lastHud > 250) { lastHud = now; renderHud(); }
+  const tr = performance.now();
   view.render();
+  const renderMs = performance.now() - tr;
+
+  const bs = balls.stats();
+  perf.frame(now, {
+    dtMs, physicsMs, renderMs,
+    active: bs.active, awake: bs.awake,
+    bodies: physics.bodyCount(), colliders: physics.colliderCount(),
+    spawnedTotal: spawned, deliveredTotal: delivered, droppedTotal: dropped,
+  });
+
+  if (now - lastHud > 250) { lastHud = now; renderHud(); }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

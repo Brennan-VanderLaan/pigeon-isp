@@ -43,6 +43,14 @@ export class Balls {
     return this.active.size;
   }
 
+  /** active total + how many are awake (the ones the solver actually pays for;
+   *  a settled, sleeping pit is nearly free). */
+  stats(): { active: number; awake: number } {
+    let awake = 0;
+    for (const rec of this.active.values()) if (!rec.handle.body.isSleeping()) awake++;
+    return { active: this.active.size, awake };
+  }
+
   /** Spawn a ball for a token at `nozzle`. Returns false if we're full (caller
    *  should drop the frame so the loft buffer doesn't leak). */
   spawn(frameId: number, port: number, nozzle: THREE.Vector3, colorHex: number, nowMs: number): boolean {
