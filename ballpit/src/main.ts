@@ -14,6 +14,7 @@ import {
   type Bridge, type BridgeEvents, type FrameToken, type LoftStats, type PortInfo,
 } from '@pigeon/protocol';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Scene } from './scene';
 import { Physics } from './physics';
 import { Arena, portColor } from './arena';
@@ -96,38 +97,50 @@ if (forceSim) {
   ws = new WsBridge(defaultBridgeUrl(), events);
   bridge = ws;
   ws.connect();
+  // A hanging connect never fires onclose, so guarantee a fallback: if no loft
+  // has answered in 3s, switch to the offline sim so there's always a factory.
+  setTimeout(() => {
+    if (!everLive && !triedSim) { triedSim = true; ws?.close(); log('net', 'no loft — falling back to sim'); startSim(); }
+  }, 3000);
 }
 
-// ---- input: RIGHT-drag tilts the table, LEFT builds -------------------------
-const MAX_TILT = 14;
-let tiltX = 0, tiltZ = 0, tilting = false, sx = 0, sy = 0;
+// ---- camera: real OrbitControls (orbit / zoom / pan) ------------------------
 const canvas = view.renderer.domElement;
+const controls = new OrbitControls(view.camera, canvas);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI * 0.495; // never under the floor
+controls.minDistance = 8;
+controls.maxDistance = 120;
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+controls.update();
+
+// ---- build input: left-CLICK places (a left-DRAG orbits the camera) ---------
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-
+let downX = 0, downY = 0, downBtn = -1;
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-canvas.addEventListener('pointerdown', (e) => {
-  if (e.button === 2) { tilting = true; sx = e.clientX; sy = e.clientY; canvas.setPointerCapture(e.pointerId); return; }
-  if (e.button === 0 && build.tool !== 'none') build.click();
-});
+canvas.addEventListener('pointerdown', (e) => { downX = e.clientX; downY = e.clientY; downBtn = e.button; });
 canvas.addEventListener('pointermove', (e) => {
   ndc.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, view.camera);
   build.hoverAt(raycaster.ray);
-  if (tilting) {
-    tiltX = clamp(((e.clientX - sx) / window.innerWidth) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
-    tiltZ = clamp(((e.clientY - sy) / window.innerHeight) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
-  }
 });
-canvas.addEventListener('pointerup', () => { tilting = false; });
-function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : v > hi ? hi : v; }
+canvas.addEventListener('pointerup', (e) => {
+  if (downBtn === 0 && build.tool !== 'none' && Math.hypot(e.clientX - downX, e.clientY - downY) < 5) {
+    build.click(); // a click, not an orbit drag
+  }
+  downBtn = -1;
+});
 
 const TOOL_KEYS: Record<string, Tool> = {
-  '1': 'none', '2': 'conveyor', '3': 'chute', '4': 'host', '5': 'sink', '0': 'erase',
+  '1': 'none', '2': 'platform', '3': 'ramp', '4': 'conveyor', '5': 'host', '6': 'sink', '0': 'erase',
 };
 window.addEventListener('keydown', (e) => {
   if (e.key in TOOL_KEYS) build.setTool(TOOL_KEYS[e.key]);
   else if (e.key === 'r' || e.key === 'R') build.rotate();
+  else if (e.key === 'g' || e.key === 'G') build.cycleGrade();
   else if (e.key === 'h' || e.key === 'H') build.cyclePort();
   else if (e.key === '[') build.setLevel(build.level - 1);
   else if (e.key === ']') build.setLevel(build.level + 1);
@@ -136,9 +149,7 @@ window.addEventListener('keydown', (e) => {
 // ---- main loop --------------------------------------------------------------
 let lastHud = 0;
 function frame(now: number): void {
-  if (!tilting) { tiltX *= 0.9; tiltZ *= 0.9; } // ease back to level
-  physics.setTilt(tiltX, tiltZ);
-
+  controls.update();
   const hits = physics.step();
   for (const [frameId, portId] of hits) {
     if (balls.catch(frameId)) {
@@ -169,14 +180,16 @@ function renderHud(): void {
     })
     .join('  ');
   const selName = build.selectedPort !== null ? (ports.get(build.selectedPort)?.pod ?? '?') : '—';
+  const rampInfo = build.tool === 'ramp' ? ` <span style="color:#7b8aa0">(grade: ${build.gradeName} — G)</span>` : '';
   hudBody.innerHTML = `
     <div>state: <span class="k">${state}</span> · ports: ${ports.size}</div>
     <div>balls in play: <span class="k">${balls.count}</span></div>
     <div>delivered: <span class="k">${delivered}</span> · dropped: <span class="warn">${dropped}</span></div>
     <div style="margin-top:6px">${legend || '—'}</div>
     <div style="margin-top:6px;color:#7b8aa0">
-      tool: <span class="k">${build.tool}</span> · level <span class="k">${build.level}</span> · host: <span class="k">${selName}</span><br>
-      <b>1</b> none · <b>2</b> conveyor · <b>3</b> chute · <b>4</b> dock · <b>5</b> sink · <b>0</b> erase<br>
-      <b>R</b> rotate · <b>H</b> next host · <b>[ ]</b> level · right-drag tilt · left build · wheel zoom
+      tool: <span class="k">${build.tool}</span>${rampInfo} · level <span class="k">${build.level}</span> · host: <span class="k">${selName}</span><br>
+      <b>1</b> none · <b>2</b> platform · <b>3</b> ramp · <b>4</b> conveyor · <b>5</b> dock · <b>6</b> sink · <b>0</b> erase<br>
+      <b>R</b> rotate · <b>G</b> grade · <b>H</b> next host · <b>[ ]</b> level<br>
+      left-click build · left-drag orbit · right-drag pan · wheel zoom
     </div>`;
 }

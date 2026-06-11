@@ -81,16 +81,21 @@ export class Balls {
     return true;
   }
 
-  /** Apply a horizontal velocity field (e.g. conveyors) to balls over it.
-   *  fn returns the target horizontal velocity at a world point, or null. */
+  /** Conveyors: a friction-DRIVE, not a velocity set. For each ball riding a
+   *  belt we apply an impulse toward the belt's surface velocity, eased so the
+   *  ball accelerates up to belt speed and no further. Balls still collide,
+   *  pile up, and can be held back — it reads as a real powered belt, not a
+   *  glued track. fn gives the belt's target horizontal velocity (or null). */
   applyField(fn: (x: number, y: number, z: number) => { x: number; z: number } | null): void {
+    const k = 0.2; // grip: fraction of the velocity gap closed per step
     for (const rec of this.active.values()) {
-      const t = rec.handle.body.translation();
+      const b = rec.handle.body;
+      const t = b.translation();
       const v = fn(t.x, t.y, t.z);
-      if (v) {
-        const lv = rec.handle.body.linvel();
-        rec.handle.body.setLinvel({ x: v.x, y: lv.y, z: v.z }, true); // true = wake
-      }
+      if (!v) continue;
+      const lv = b.linvel();
+      const m = b.mass() || 1;
+      b.applyImpulse({ x: (v.x - lv.x) * m * k, y: 0, z: (v.z - lv.z) * m * k }, true);
     }
   }
 

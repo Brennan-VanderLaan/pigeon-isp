@@ -1,17 +1,16 @@
 import * as THREE from 'three';
 
-// The render side: a fixed angled camera over the factory floor, wheel to zoom.
-// (Left-drag is reserved for the tilt control in main.ts, so we don't orbit.)
+// The render side: scene, lights, renderer, and a perspective camera. The
+// camera is driven by OrbitControls in main.ts (orbit / zoom / pan) — no fixed
+// view, no magic.
 export class Scene {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
   readonly renderer: THREE.WebGLRenderer;
-  private dist = 38;
-  private target = new THREE.Vector3(0, 0, 0);
 
   constructor(host: HTMLElement) {
     this.scene.background = new THREE.Color(0x0b0f15);
-    this.scene.fog = new THREE.Fog(0x0b0f15, 60, 120);
+    this.scene.fog = new THREE.Fog(0x0b0f15, 70, 140);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -20,7 +19,7 @@ export class Scene {
     host.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
-    this.placeCamera();
+    this.camera.position.set(0, 32, 32); // a starting three-quarter view
 
     const hemi = new THREE.HemisphereLight(0xbcd2ff, 0x202838, 0.9);
     this.scene.add(hemi);
@@ -36,17 +35,6 @@ export class Scene {
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
-    this.renderer.domElement.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      this.dist = THREE.MathUtils.clamp(this.dist * (1 + Math.sign(e.deltaY) * 0.08), 16, 90);
-      this.placeCamera();
-    }, { passive: false });
-  }
-
-  private placeCamera(): void {
-    // Angled three-quarter view.
-    this.camera.position.set(0, this.dist * 0.78, this.dist * 0.62);
-    this.camera.lookAt(this.target);
   }
 
   private resize(): void {

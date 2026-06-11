@@ -125,7 +125,7 @@ export class WsBridge implements Bridge {
 export function defaultBridgeUrl(): string {
   const q = new URLSearchParams(location.search).get('bridge');
   if (q) return q;
-  if (location.port === '5173') return 'ws://127.0.0.1:9777/ws';
+  if (location.port === '5173' || location.port === '5174') return 'ws://127.0.0.1:9777/ws';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws`;
 }
