@@ -49,27 +49,36 @@ document.body.appendChild(hud);
 const hudL = document.getElementById('hud-body');
 if (hudL) hudL.textContent = `GPU sim · ${COUNT.toLocaleString()} particles`;
 
-let fps = 60, rend = 0, prev = performance.now(), lastHud = 0;
+let fps = 60, comp = 0, rend = 0, prev = performance.now(), lastHud = 0;
 const ewma = (p: number, v: number) => p + 0.1 * (v - p);
 
-function frame(now: number): void {
+// Async, self-scheduling loop: AWAIT the compute (one step/frame, sequenced and
+// timed) then the render. Awaiting computeAsync forces GPU completion, so
+// `comp` is the true per-step GPU cost — the number we're optimizing.
+async function frame(): Promise<void> {
+  const now = performance.now();
   const dt = now - prev; prev = now;
   controls.update();
-  particles.step();          // GPU compute pass
-  const t = performance.now();
-  view.render();             // reads particle positions from the GPU buffer
-  rend = ewma(rend, performance.now() - t);
-  fps = ewma(fps, 1000 / Math.max(dt, 0.001));
 
+  const tc = performance.now();
+  await particles.step();
+  comp = ewma(comp, performance.now() - tc);
+
+  const tr = performance.now();
+  await view.renderer.renderAsync(view.scene, view.camera);
+  rend = ewma(rend, performance.now() - tr);
+
+  fps = ewma(fps, 1000 / Math.max(dt, 0.001));
   if (now - lastHud > 200) {
     lastHud = now;
     const c = fps >= 55 ? '#6fdc8c' : fps >= 30 ? '#ffd479' : '#ff6b6b';
+    const cc = comp > 12 ? '#ff6b6b' : comp > 6 ? '#ffd479' : '#6fdc8c';
     hud.innerHTML =
       `<span style="color:${c}">${fps.toFixed(0)} fps</span>\n` +
-      `${(1000 / Math.max(fps, 1)).toFixed(1)} ms frame\n` +
-      `render ${rend.toFixed(1)} ms\n` +
+      `<span style="color:${cc}">compute ${comp.toFixed(2)} ms</span>\n` +
+      `render ${rend.toFixed(2)} ms\n` +
       `<span style="color:#7b8aa0">${COUNT.toLocaleString()} particles (GPU)</span>`;
   }
-  requestAnimationFrame(frame);
+  requestAnimationFrame(() => { void frame(); });
 }
-requestAnimationFrame(frame);
+void frame();

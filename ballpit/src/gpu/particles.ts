@@ -64,7 +64,7 @@ export class GpuParticles {
     })().compute(count) as Parameters<WebGPURenderer['computeAsync']>[0];
 
     // render: low-poly spheres, instanced; position comes from the GPU buffer
-    const geo = new THREE.IcosahedronGeometry(radius, 1);
+    const geo = new THREE.IcosahedronGeometry(radius, 0); // 20 tris is plenty
     const mat = new MeshStandardNodeMaterial();
     mat.positionNode = positionLocal.add(positions.element(instanceIndex));
     mat.colorNode = colors.element(instanceIndex);
@@ -79,7 +79,10 @@ export class GpuParticles {
     this.mesh = mesh;
   }
 
-  step(): void {
-    this.renderer.computeAsync(this.updateNode);
+  /** Run one sim step. AWAIT it so exactly one step happens per frame, properly
+   *  sequenced before the render — and so timing it gives the true GPU cost
+   *  (computeAsync resolves when the GPU work completes). */
+  step(): Promise<void> {
+    return this.renderer.computeAsync(this.updateNode);
   }
 }
