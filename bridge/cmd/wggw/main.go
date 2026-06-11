@@ -54,7 +54,14 @@ func main() {
 	httpAddr := flag.String("http", ":8088", "config server listen address")
 	dns := flag.String("dns", "10.99.0.1", "DNS server pushed to clients (the uplink resolver)")
 	domain := flag.String("domain", "pigeon.isp", "search domain pushed to clients")
+	aviaryGW := flag.String("aviary-gateway", "10.99.0.1", "default gateway on the aviary (the uplink) for off-subnet traffic")
+	aviaryNet := flag.String("aviary-net", "10.99.0.0/16", "the on-link aviary subnet")
 	flag.Parse()
+
+	_, anet, err := net.ParseCIDR(*aviaryNet)
+	if err != nil {
+		log.Fatalf("bad aviary-net %s: %v", *aviaryNet, err)
+	}
 
 	// Keys: derive from a stable seed (WG_SEED) when present, so the gateway
 	// keeps the SAME keys across pod restarts/redeploys and already-scanned
@@ -68,7 +75,10 @@ func main() {
 		log.Fatalf("bad base ip %s", *baseIP)
 	}
 
-	g := &gw{loftURL: "ws://" + *gateway + "/port", endpoint: *endpoint, gwPub: gwPub, dns: *dns, domain: *domain}
+	g := &gw{
+		loftURL: "ws://" + *gateway + "/port", endpoint: *endpoint, gwPub: gwPub,
+		dns: *dns, domain: *domain, gwIP: net.ParseIP(*aviaryGW).To4(), aviaryNet: anet,
+	}
 	tdev := newChanTun(1420, g.fromPeer)
 	g.tun = tdev
 
@@ -122,10 +132,12 @@ func main() {
 type gw struct {
 	loftURL  string
 	endpoint string
-	gwPub    []byte
-	dns      string // resolver pushed to clients (uplink)
-	domain   string // search domain pushed to clients
-	tun      *chanTun
+	gwPub     []byte
+	dns       string // resolver pushed to clients (uplink)
+	domain    string // search domain pushed to clients
+	gwIP      net.IP // default gateway on the aviary (the uplink) for off-subnet
+	aviaryNet *net.IPNet
+	tun       *chanTun
 	dev      *device.Device
 	mu       sync.Mutex
 	peers    []*peer
@@ -429,11 +441,21 @@ func (h *bridgeHost) sendFrame(frame []byte) {
 // resolving the destination MAC by ARP (who-has, cached).
 func (h *bridgeHost) sendIP(ippkt []byte) {
 	dst := net.IP(ippkt[16:20])
+	// Route like a real host with a default gateway. On-subnet destinations are
+	// delivered directly (ARP for the dst). Off-subnet — e.g. a public IP in
+	// full-tunnel mode — goes to the GATEWAY's MAC (the uplink), exactly as a
+	// host sends off-LAN packets via its default route. Without this we'd ARP
+	// the aviary for "who has 142.250.x.x", which nothing answers, and the
+	// packet would be dropped.
+	nextHop := dst
+	if h.gw.aviaryNet != nil && !h.gw.aviaryNet.Contains(dst) {
+		nextHop = h.gw.gwIP
+	}
 	h.mu.Lock()
-	dmac, known := h.arp[dst.String()]
+	dmac, known := h.arp[nextHop.String()]
 	h.mu.Unlock()
 	if !known {
-		h.arpRequest(dst) // ask; the packet is dropped (TCP/ping will retry)
+		h.arpRequest(nextHop) // ask; the packet is dropped (TCP/ping will retry)
 		return
 	}
 	frame := make([]byte, 14+len(ippkt))
