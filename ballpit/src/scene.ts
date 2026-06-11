@@ -1,22 +1,18 @@
 import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
 
-// The render side: scene, lights, renderer, and a perspective camera. The
-// camera is driven by OrbitControls in main.ts (orbit / zoom / pan) — no fixed
-// view, no magic.
+// The render side on WebGPU. Same three.js scene (build parts, lights, balls);
+// the renderer is WebGPURenderer so the GPU particle compute (next milestones)
+// shares one device with rendering — no CPU round-trip. Construction is async
+// (device init), so use `await Scene.create(host)`.
 export class Scene {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
-  readonly renderer: THREE.WebGLRenderer;
+  renderer!: WebGPURenderer;
 
-  constructor(host: HTMLElement) {
+  private constructor() {
     this.scene.background = new THREE.Color(0x0b0f15);
-    this.scene.fog = new THREE.Fog(0x0b0f15, 70, 140);
-
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    host.appendChild(this.renderer.domElement);
+    this.scene.fog = new THREE.Fog(0x0b0f15, 70, 160);
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
     this.camera.position.set(0, 32, 32); // a starting three-quarter view
@@ -32,9 +28,20 @@ export class Scene {
     sun.shadow.camera.top = s; sun.shadow.camera.bottom = -s;
     sun.shadow.camera.far = 120;
     this.scene.add(sun);
+  }
 
-    this.resize();
-    window.addEventListener('resize', () => this.resize());
+  static async create(host: HTMLElement): Promise<Scene> {
+    const v = new Scene();
+    const renderer = new WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    await renderer.init(); // acquire the WebGPU device/adapter
+    host.appendChild(renderer.domElement);
+    v.renderer = renderer;
+    v.resize();
+    window.addEventListener('resize', () => v.resize());
+    return v;
   }
 
   private resize(): void {

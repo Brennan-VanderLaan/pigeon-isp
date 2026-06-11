@@ -15,7 +15,7 @@ import {
   type Bridge, type BridgeEvents, type FrameToken, type LoftStats, type PortInfo,
 } from '@pigeon/protocol';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Scene } from './scene';
 import { PhysicsClient } from './physics-client';
 import { Arena, portColor } from './arena';
@@ -35,7 +35,7 @@ function log(who: string, line: string): void {
   while (logEl.childElementCount > 14) logEl.lastChild!.remove();
 }
 
-const view = new Scene(document.getElementById('app')!);
+const view = await Scene.create(document.getElementById('app')!);
 const perf = new Perf();
 
 const ports = new Map<number, PortInfo>();
