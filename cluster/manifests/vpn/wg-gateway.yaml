@@ -17,6 +17,10 @@ metadata:
     app: wg-gateway
 spec:
   replicas: 1
+  # hostNetwork pin to the single control-plane node + UDP :51820 means the old
+  # and new pod can't co-exist (port clash) — roll by replacing, not overlapping.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: wg-gateway
@@ -37,6 +41,16 @@ spec:
           env:
             - name: GOMODCACHE
               value: /gocache
+            # Stable per-cluster seed so the gateway keeps the same WireGuard
+            # keys across restarts/redeploys (scanned QRs stay valid). Planted
+            # by up.ps1; optional so the pod still starts without it (then keys
+            # are random per run).
+            - name: WG_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: wg-seed
+                  key: seed
+                  optional: true
           command:
             - /bin/sh
             - -ec

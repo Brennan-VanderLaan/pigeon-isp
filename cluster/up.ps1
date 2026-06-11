@@ -114,6 +114,16 @@ kubectl -n pigeon-system create configmap tower-src --from-file="$tmp\tower-src.
 kubectl apply -f "$PSScriptRoot\manifests\tower\"
 
 Write-Host "==> deploying the WireGuard VPN gateway" -ForegroundColor Cyan
+# Plant a stable random seed (once per cluster) so the gateway's WireGuard keys
+# survive restarts — a scanned QR keeps working across redeploys. Only created
+# if absent, so re-running up.ps1 never rotates it out from under live clients.
+$haveSeed = cmd /c "kubectl -n pigeon-system get secret wg-seed 2>nul"
+if (-not $haveSeed) {
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $seed = [Convert]::ToBase64String($bytes)
+    kubectl -n pigeon-system create secret generic wg-seed --from-literal=seed=$seed | Out-Null
+}
 kubectl apply -f "$PSScriptRoot\manifests\vpn\wg-gateway.yaml"
 if ($WithIKEv2) {
     Write-Host "==> deploying the IKEv2 gateway (experimental)" -ForegroundColor Cyan

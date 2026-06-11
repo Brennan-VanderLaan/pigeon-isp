@@ -20,6 +20,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -29,11 +30,15 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -49,7 +54,13 @@ func main() {
 	httpAddr := flag.String("http", ":8088", "config server listen address")
 	flag.Parse()
 
-	gwPriv, gwPub := genKey()
+	// Keys: derive from a stable seed (WG_SEED) when present, so the gateway
+	// keeps the SAME keys across pod restarts/redeploys and already-scanned
+	// QRs/configs stay valid. Without a seed, fall back to random (a single
+	// run is fine; a restart then invalidates clients — the lab footgun this
+	// avoids). up.ps1 plants a per-cluster random seed in a Secret.
+	seed := seedFromEnv()
+	gwPriv, gwPub := deriveKey(seed, "gw")
 	base := net.ParseIP(*baseIP).To4()
 	if base == nil {
 		log.Fatalf("bad base ip %s", *baseIP)
@@ -61,12 +72,13 @@ func main() {
 
 	logger := device.NewLogger(device.LogLevelError, "wg ")
 	dev := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+	g.dev = dev // so /configs can report real handshake / byte counters
 
 	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(gwPriv), *wgPort)
 
 	// Mint peers: one keypair + IP each, registered with WireGuard and bridged.
 	for i := 0; i < *peers; i++ {
-		pPriv, pPub := genKey()
+		pPriv, pPub := deriveKey(seed, fmt.Sprintf("peer:%d", i))
 		ip := make(net.IP, 4)
 		copy(ip, base)
 		ip[3] = base[3] + byte(i)
@@ -76,6 +88,7 @@ func main() {
 			index: i, ip: ip, mac: mac,
 			privB64: base64.StdEncoding.EncodeToString(pPriv),
 			pubB64:  base64.StdEncoding.EncodeToString(pPub),
+			pubHex:  hex.EncodeToString(pPub), // key for wireguard's IpcGet status
 		})
 	}
 
@@ -94,6 +107,10 @@ func main() {
 
 	http.HandleFunc("/configs", g.serveConfigs)
 	http.HandleFunc("/vpn/configs", g.serveConfigs) // behind the traefik /vpn prefix
+	// A phone scans the QR straight into the WireGuard app — no typing, no file
+	// copy. The QR encodes the exact same config text /configs serves.
+	http.HandleFunc("/qr/", g.serveQR)
+	http.HandleFunc("/vpn/qr/", g.serveQR)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "wg-gateway\n") })
 	log.Fatal(http.ListenAndServe(*httpAddr, nil))
 }
@@ -105,6 +122,7 @@ type gw struct {
 	endpoint string
 	gwPub    []byte
 	tun      *chanTun
+	dev      *device.Device
 	mu       sync.Mutex
 	peers    []*peer
 	byIP     map[string]*bridgeHost
@@ -115,6 +133,7 @@ type peer struct {
 	ip              net.IP
 	mac             net.HardwareAddr
 	privB64, pubB64 string
+	pubHex          string
 	host            *bridgeHost
 }
 
@@ -149,20 +168,161 @@ func (g *gw) toPeer(ippkt []byte) {
 	g.tun.deliver(ippkt)
 }
 
+// configFor renders the WireGuard client config for a peer at `endpoint`. Same
+// text whether it's copy-pasted (/configs) or encoded into a QR (/qr).
+func (g *gw) configFor(p *peer, endpoint string) string {
+	return fmt.Sprintf(
+		"[Interface]\nPrivateKey = %s\nAddress = %s/16\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 10.99.0.0/16\nPersistentKeepalive = 15\n",
+		p.privB64, p.ip.String(), base64.StdEncoding.EncodeToString(g.gwPub), endpoint)
+}
+
+// resolveEndpoint swaps in a caller-supplied gateway host (e.g. the LAN IP a
+// phone can actually reach) while keeping the configured WireGuard UDP port.
+// 127.0.0.1 is useless to a phone, so the UI passes ?host=<your LAN ip>.
+func (g *gw) resolveEndpoint(host string) string {
+	host = sanitizeHost(host)
+	if host == "" {
+		return g.endpoint
+	}
+	port := "51820"
+	if _, p, err := net.SplitHostPort(g.endpoint); err == nil && p != "" {
+		port = p
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// sanitizeHost keeps only characters legal in a hostname / IP literal, so a
+// query param can never inject extra lines into the rendered config.
+func sanitizeHost(h string) string {
+	h = strings.TrimSpace(h)
+	for _, r := range h {
+		ok := r == '.' || r == '-' || r == ':' || r == '%' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !ok {
+			return ""
+		}
+	}
+	if len(h) > 253 {
+		return ""
+	}
+	return h
+}
+
+// wgStat is one peer's live WireGuard state, read from wireguard-go's UAPI.
+type wgStat struct {
+	handshakeSec int64  // unix secs of last handshake, 0 = never
+	rx, tx       uint64 // bytes
+	endpoint     string // the device's current source addr (its public ip:port)
+}
+
+// wgStatus queries the userspace WireGuard device for per-peer telemetry. This
+// is the ground truth for "is the tunnel actually up" — a real handshake only
+// happens when a device with the matching key connects.
+func (g *gw) wgStatus() map[string]wgStat {
+	res := map[string]wgStat{}
+	if g.dev == nil {
+		return res
+	}
+	dump, err := g.dev.IpcGet()
+	if err != nil {
+		return res
+	}
+	var cur string
+	var st wgStat
+	flush := func() {
+		if cur != "" {
+			res[cur] = st
+		}
+	}
+	for _, line := range strings.Split(dump, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "public_key":
+			flush()
+			cur, st = v, wgStat{}
+		case "last_handshake_time_sec":
+			st.handshakeSec, _ = strconv.ParseInt(v, 10, 64)
+		case "rx_bytes":
+			st.rx, _ = strconv.ParseUint(v, 10, 64)
+		case "tx_bytes":
+			st.tx, _ = strconv.ParseUint(v, 10, 64)
+		case "endpoint":
+			st.endpoint = v
+		}
+	}
+	flush()
+	return res
+}
+
 func (g *gw) serveConfigs(w http.ResponseWriter, r *http.Request) {
+	ep := g.resolveEndpoint(r.URL.Query().Get("host"))
+	q := ""
+	if h := sanitizeHost(r.URL.Query().Get("host")); h != "" {
+		q = "?host=" + url.QueryEscape(h)
+	}
+	stats := g.wgStatus()
+	now := time.Now().Unix()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := []map[string]string{}
 	for _, p := range g.peers {
-		cfg := fmt.Sprintf(
-			"[Interface]\nPrivateKey = %s\nAddress = %s/16\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 10.99.0.0/16\nPersistentKeepalive = 15\n",
-			p.privB64, p.ip.String(), base64.StdEncoding.EncodeToString(g.gwPub), g.endpoint)
+		st := stats[p.pubHex]
+		hs := "never"
+		if st.handshakeSec > 0 {
+			hs = fmt.Sprint(now - st.handshakeSec) // seconds since last handshake
+		}
 		out = append(out, map[string]string{
-			"name": p.host.name, "ip": p.ip.String(), "config": cfg, "connected": fmt.Sprint(p.host.connected()),
+			"name": p.host.name, "ip": p.ip.String(), "config": g.configFor(p, ep),
+			"connected": fmt.Sprint(p.host.connected()),
+			"qr":        "/vpn/qr/" + p.host.name + ".png" + q,
+			"handshake": hs,
+			"rx":        fmt.Sprint(st.rx),
+			"tx":        fmt.Sprint(st.tx),
+			"wgPeer":    st.endpoint,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"peers": out, "endpoint": g.endpoint})
+	json.NewEncoder(w).Encode(map[string]any{"peers": out, "endpoint": ep})
+}
+
+// serveQR returns a PNG QR code of a peer's WireGuard config, ready to scan
+// with the WireGuard mobile app. URL: /vpn/qr/<name>(.png), e.g. /vpn/qr/vpn0.
+func (g *gw) serveQR(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Path
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, ".png")
+
+	g.mu.Lock()
+	var match *peer
+	for _, p := range g.peers {
+		if p.host.name == name {
+			match = p
+			break
+		}
+	}
+	cfg := ""
+	if match != nil {
+		cfg = g.configFor(match, g.resolveEndpoint(r.URL.Query().Get("host")))
+	}
+	g.mu.Unlock()
+
+	if match == nil {
+		http.Error(w, "no such peer", http.StatusNotFound)
+		return
+	}
+	png, err := qrcode.Encode(cfg, qrcode.Medium, 512)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store") // config keys can rotate on restart
+	w.Write(png)
 }
 
 // ---- per-peer bridge host ----------------------------------------------------
@@ -380,11 +540,44 @@ func (t *chanTun) Close() error {
 func genKey() (priv, pub []byte) {
 	priv = make([]byte, 32)
 	rand.Read(priv)
+	return clampPub(priv)
+}
+
+// clampPub clamps a 32-byte scalar into a valid X25519 private key and returns
+// it with its public key.
+func clampPub(priv []byte) (p, pub []byte) {
 	priv[0] &= 248
 	priv[31] &= 127
 	priv[31] |= 64
 	pub, _ = curve25519.X25519(priv, curve25519.Basepoint)
 	return priv, pub
+}
+
+// seedFromEnv reads WG_SEED (base64 or raw). Empty/short => nil, meaning "use
+// random keys this run".
+func seedFromEnv() []byte {
+	s := strings.TrimSpace(os.Getenv("WG_SEED"))
+	if s == "" {
+		return nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) >= 16 {
+		return b
+	}
+	if len(s) >= 16 {
+		return []byte(s)
+	}
+	return nil
+}
+
+// deriveKey deterministically derives a WireGuard keypair from (seed, label).
+// Same seed+label => same keys, so configs survive restarts. With no seed it
+// falls back to a fresh random key (previous behaviour).
+func deriveKey(seed []byte, label string) (priv, pub []byte) {
+	if seed == nil {
+		return genKey()
+	}
+	h := sha256.Sum256(append(append([]byte(label), ':'), seed...))
+	return clampPub(h[:])
 }
 
 // macForIP derives a stable MAC the way the CNI does: 0a:58 + the 4 IP octets.
