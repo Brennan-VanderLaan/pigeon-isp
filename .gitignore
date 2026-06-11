@@ -8,3 +8,4 @@ bridge/cmd/pigeon-cni/pigeon-cni
 .vite/
 tower/tower
 .claude/
+*.exe

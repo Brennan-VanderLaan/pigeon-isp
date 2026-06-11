@@ -384,6 +384,17 @@ window.addEventListener('pointerdown', (e) => {
     // Otherwise dispatch by what's under the cursor on the floor.
     const g = world.pickGround();
     const cell = g ? board.worldToCell(g) : null;
+    // Relocating a roost: the next click lands it on a free slot.
+    if (movingIdent) {
+      const slot = cell ? board.slotIndexAtCell(cell.col, cell.row) : -1;
+      if (slot >= 0 && board.moveHost(movingIdent, slot)) {
+        hud.log('pigeon-isp', 'roost moved');
+      } else {
+        hud.log('pigeon-isp', 'move cancelled');
+      }
+      endMoveRoost();
+      return;
+    }
     if (!cell) { hud.closeInspector(); hud.closeFilterPanel(); activeApplianceId = null; return; }
     // Editing an appliance's ports: clicking its perimeter toggles a port.
     if (activeApplianceId !== null) {
@@ -476,6 +487,7 @@ window.addEventListener('keydown', (e) => {
     rebuildGhost();
   }
   if (e.key === 'Escape') {
+    if (movingIdent) { endMoveRoost(); hud.log('pigeon-isp', 'move cancelled'); }
     hud.closeInspector();
     hud.closeFilterPanel();
   }
@@ -570,13 +582,33 @@ function showRoostDiagnostics(port: PortInfo, clientX: number, clientY: number):
     </table>
     <div class="row">
       <button id="rp-shell">shell</button>
+      <button id="rp-move">move roost</button>
       <button id="rp-close">close</button>
     </div>`;
   roostPop.querySelector('#rp-shell')!.addEventListener('click', () => {
     new PodTerminal(port.pod, port.namespace || 'aviary');
     roostPop.style.display = 'none';
   });
+  roostPop.querySelector('#rp-move')!.addEventListener('click', () => {
+    startMoveRoost(`${port.namespace}/${port.pod}`, port.pod);
+  });
   roostPop.querySelector('#rp-close')!.addEventListener('click', () => { roostPop.style.display = 'none'; });
+}
+
+// Click-to-move a roost: highlight every free perimeter slot, then the next
+// floor click on one relocates the host there (persisted). Esc / a click off a
+// slot cancels.
+let movingIdent: string | null = null;
+function startMoveRoost(ident: string, pod: string): void {
+  roostPop.style.display = 'none';
+  movingIdent = ident;
+  board.highlightFreeSlots();
+  hud.setTool('select');
+  hud.log('pigeon-isp', `moving ${pod} — click a glowing slot to land it (Esc to cancel)`);
+}
+function endMoveRoost(): void {
+  movingIdent = null;
+  board.clearSlotHighlights();
 }
 
 function esc(s: string): string {

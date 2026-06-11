@@ -142,6 +142,8 @@ export interface HostInfo {
 const beltBase = new THREE.BoxGeometry(CELL * 0.94, 0.08, CELL * 0.94);
 const beltBaseMat = new THREE.MeshStandardMaterial({ color: 0x232c3a, roughness: 0.9 });
 const filterBaseMat = new THREE.MeshStandardMaterial({ color: 0x2d2438, roughness: 0.8 });
+const slotHiGeo = new THREE.PlaneGeometry(CELL * 0.9, CELL * 0.9);
+const slotHiMat = new THREE.MeshBasicMaterial({ color: 0x53d8e8, transparent: true, opacity: 0.32, depthWrite: false });
 const arrowGeo = new THREE.ConeGeometry(0.16, 0.42, 4);
 const arrowMat = new THREE.MeshStandardMaterial({ color: 0xffb347, roughness: 0.6 });
 const sideArrowMat = new THREE.MeshStandardMaterial({ color: 0xb98aff, roughness: 0.6 });
@@ -159,6 +161,7 @@ export class Board {
   private idToIdent = new Map<number, string>(); // port id -> ident
   private shelved = new Set<string>(); // idents kept off the board (persisted)
   private placementRules: PlacementRule[] = []; // persisted
+  private slotMarkers: THREE.Mesh[] = []; // transient free-slot highlights while moving a roost
   onHosts: () => void = () => {}; // fired when the inventory changes
   private appliances = new Map<number, Appliance>();
   private nextApplianceId = 1;
@@ -673,11 +676,18 @@ export class Board {
     if (this.shelved.has(ident)) { this.onHosts(); return; }
 
     const slotIdx = this.pickSlot(ident, port.pod);
-    this.usedSlots.add(slotIdx);
+    this.placeAtSlot(port, slotIdx);
     this.knownHosts.get(ident)!.slot = slotIdx;
+    this.onHosts();
+  }
+
+  /** Drop a host's roost+landing meshes at slot `slotIdx` and record the loc.
+   *  Shared by initial placement (addPort) and relocation (moveHost). Any
+   *  machine sitting on the slot is scrapped — the host wins. */
+  private placeAtSlot(port: PortInfo, slotIdx: number): void {
+    this.usedSlots.add(slotIdx);
     const slot = SLOTS[slotIdx];
 
-    // Building over the slot? The host wins; the machine is scrap.
     this.removeMachine(slot.roost.col, slot.roost.row);
     this.removeMachine(slot.landing.col, slot.landing.row);
 
@@ -692,7 +702,68 @@ export class Board {
     this.cells.set(key(slot.landing.col, slot.landing.row), { type: 'landing', port, mesh: landingMesh });
 
     this.portLocs.set(port.id, { roost: { ...slot.roost }, landing: { ...slot.landing }, facing: slot.facing });
+  }
+
+  // ---- moving roosts -----------------------------------------------------------
+
+  /** Perimeter slots with nothing on them — candidates to move a roost to.
+   *  Each carries its roost cell so the UI can highlight where it'll land. */
+  freeSlots(): { idx: number; col: number; row: number; facing: number }[] {
+    const out: { idx: number; col: number; row: number; facing: number }[] = [];
+    SLOTS.forEach((s, idx) => {
+      if (!this.usedSlots.has(idx)) out.push({ idx, col: s.roost.col, row: s.roost.row, facing: s.facing });
+    });
+    return out;
+  }
+
+  /** Which slot's roost (or landing) cell sits at col,row — for click-to-move
+   *  target picking. -1 if the cell isn't a slot. */
+  slotIndexAtCell(col: number, row: number): number {
+    return SLOTS.findIndex(
+      (s) => (s.roost.col === col && s.roost.row === row) || (s.landing.col === col && s.landing.row === row),
+    );
+  }
+
+  /** Glowing tiles over every free slot, so during a move you can see exactly
+   *  where a roost can land. Cleared by clearSlotHighlights(). */
+  highlightFreeSlots(): void {
+    this.clearSlotHighlights();
+    for (const s of this.freeSlots()) {
+      const m = new THREE.Mesh(slotHiGeo, slotHiMat.clone());
+      m.position.copy(this.cellToWorld(s.col, s.row, 0.06));
+      m.rotation.x = -Math.PI / 2;
+      this.group.add(m);
+      this.slotMarkers.push(m);
+    }
+  }
+
+  clearSlotHighlights(): void {
+    for (const m of this.slotMarkers) {
+      this.group.remove(m);
+      (m.material as THREE.Material).dispose();
+    }
+    this.slotMarkers = [];
+  }
+
+  /** Relocate an already-placed host to a free perimeter slot. Persists the new
+   *  assignment so it sticks across reloads/reconnects. Returns false if the
+   *  host isn't on the board or the target slot is taken. */
+  moveHost(ident: string, targetSlot: number): boolean {
+    if (targetSlot < 0 || targetSlot >= SLOTS.length || this.usedSlots.has(targetSlot)) return false;
+    let portId = -1;
+    for (const [id, loc] of this.portLocs) {
+      if (this.idToIdent.get(id) === ident) { portId = id; this.removePortVisuals(id, loc); break; }
+    }
+    if (portId < 0) return false;
+    const h = this.knownHosts.get(ident);
+    if (!h) return false;
+    this.slotByIdent.set(ident, targetSlot);
+    this.saveSlots();
+    this.placeAtSlot(h.port, targetSlot);
+    h.slot = targetSlot;
     this.onHosts();
+    this.onChange();
+    return true;
   }
 
   /** Choose a perimeter slot for a host: its remembered slot, else a slot
