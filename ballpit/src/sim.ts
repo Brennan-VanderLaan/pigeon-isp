@@ -8,10 +8,17 @@ import type { ColliderSpec, ConveyorCell } from './proto';
 export const TTL_MS = 25_000;
 export const OOB_Y = -8;
 const CONVEY_GRIP = 0.2;
+// Aggressive sleeping: a ball that stays this slow for SLEEP_FRAMES gets parked.
+// Rapier re-wakes it the instant another body touches it, so a settled pit costs
+// almost nothing while a disturbed one springs back to life. This is what makes
+// a huge concurrent pit affordable.
+const SLEEP_V2 = 0.14 * 0.14; // linear speed² threshold
+const SLEEP_A2 = 0.5 * 0.5;   // angular speed² threshold
+const SLEEP_FRAMES = 24;      // ~0.4s below threshold → sleep
 
 export interface SimOpts { cell: number; floorH: number; maxBalls: number }
 
-interface Ball { body: RAPIER.RigidBody; collider: RAPIER.Collider; slot: number; spawnMs: number }
+interface Ball { body: RAPIER.RigidBody; collider: RAPIER.Collider; slot: number; spawnMs: number; slow: number }
 
 export class Sim {
   readonly world: RAPIER.World;
@@ -36,6 +43,9 @@ export class Sim {
   constructor(opts: SimOpts) {
     this.world = new RAPIER.World({ x: 0, y: -19, z: 0 });
     this.events = new RAPIER.EventQueue(true);
+    // A churning ball pit doesn't need a stiff solver — fewer iterations is a
+    // big throughput win for a small accuracy cost.
+    this.world.integrationParameters.numSolverIterations = 2;
     this.cell = opts.cell;
     this.floorH = opts.floorH;
     this.free = Array.from({ length: opts.maxBalls }, (_, i) => opts.maxBalls - 1 - i);
@@ -82,12 +92,15 @@ export class Sim {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setLinvel(vx, vy, vz).setLinearDamping(0.05),
     );
+    // NO COLLISION_EVENTS on balls: we only care about ball↔sink, and the sink
+    // sensor carries the flag. Setting it on every ball made Rapier emit (and us
+    // drain) an event for every ball-ball / ball-floor contact — the dominant
+    // cost in a dense pit. Sink intersections still fire via the sensor's flag.
     const collider = this.world.createCollider(
-      RAPIER.ColliderDesc.ball(radius).setRestitution(0.35).setFriction(0.5).setDensity(1.2)
-        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+      RAPIER.ColliderDesc.ball(radius).setRestitution(0.35).setFriction(0.5).setDensity(1.2),
       body,
     );
-    this.balls.set(frameId, { body, collider, slot, spawnMs: nowMs });
+    this.balls.set(frameId, { body, collider, slot, spawnMs: nowMs, slow: 0 });
     this.ballByCollider.set(collider.handle, frameId);
     return slot;
   }
@@ -133,7 +146,14 @@ export class Sim {
 
     const dropped: number[] = [];
     for (const [frameId, b] of this.balls) {
-      const t = b.body.translation();
+      const body = b.body;
+      if (!body.isSleeping()) {
+        const lv = body.linvel(), av = body.angvel();
+        if (lv.x * lv.x + lv.y * lv.y + lv.z * lv.z < SLEEP_V2 && av.x * av.x + av.y * av.y + av.z * av.z < SLEEP_A2) {
+          if (++b.slow >= SLEEP_FRAMES) body.sleep();
+        } else { b.slow = 0; }
+      }
+      const t = body.translation();
       if (t.y < OOB_Y || nowMs - b.spawnMs > TTL_MS) dropped.push(frameId);
     }
     for (const [frameId] of delivered) this.despawn(frameId);

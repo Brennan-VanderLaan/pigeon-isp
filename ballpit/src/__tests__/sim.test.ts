@@ -56,6 +56,30 @@ describe('Sim — solids are solid', () => {
   });
 });
 
+describe('Sim — balls collide with each other', () => {
+  it('two overlapping balls push apart (collision response survives without COLLISION_EVENTS on balls)', () => {
+    const sim = newSim();
+    sim.addPart('floor', [{ hx: 10, hy: 0.5, hz: 10, x: 0, y: -0.5, z: 0 }]);
+    // start them overlapping: centers 0.2 apart, but radius 0.35 each (2r = 0.7)
+    sim.spawn(10, 0, 0.4, 0, 0, 0, 0, 0.35, 0);
+    sim.spawn(11, 0.2, 0.4, 0, 0, 0, 0, 0.35, 0);
+    run(sim, 120);
+    const a = sim.ballPos(10)!, b = sim.ballPos(11)!;
+    const d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+    expect(d).toBeGreaterThan(0.6); // separated to ~2r, not interpenetrating
+  });
+
+  it('a dropped ball stacks ON another, not through it', () => {
+    const sim = newSim();
+    sim.addPart('floor', [{ hx: 10, hy: 0.5, hz: 10, x: 0, y: -0.5, z: 0 }]);
+    sim.spawn(12, 0, 0.4, 0, 0, 0, 0, 0.35, 0);   // resting on floor
+    sim.spawn(13, 0, 3, 0, 0, 0, 0, 0.35, 0);     // dropped straight onto it
+    run(sim, 180);
+    const bottom = sim.ballPos(12)!, top = sim.ballPos(13)!;
+    expect(top.y).toBeGreaterThan(bottom.y + 0.4); // stacked, not coincident
+  });
+});
+
 describe('Sim — sinks deliver', () => {
   it('a ball entering a sink sensor delivers to its port', () => {
     const sim = newSim();
