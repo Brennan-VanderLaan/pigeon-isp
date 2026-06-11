@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import type RAPIER from '@dimforge/rapier3d-compat';
-import { Physics } from './physics';
+import type { PhysicsClient } from './physics-client';
+import type { ColliderSpec, ConveyorCell } from './proto';
 import { portColor } from './arena';
 
 // The construction system: a 3D grid (col, row, level) of placeable parts — the
@@ -54,9 +54,7 @@ export class Build {
   selectedPort: number | null = null;
 
   private parts = new Map<string, Part>();
-  private bodies = new Map<string, RAPIER.RigidBody[]>();
   private meshes = new Map<string, THREE.Object3D>();
-  private sinkSensors = new Map<string, number>(); // cellKey -> collider handle
   private group = new THREE.Group();
   private ghost: THREE.Object3D | null = null;
   private hover: { col: number; row: number } | null = null;
@@ -65,9 +63,10 @@ export class Build {
   private autoSlot = new Map<number, number>();
   private nextSlot = 0;
 
-  constructor(scene: THREE.Scene, private physics: Physics) {
+  constructor(scene: THREE.Scene, private physics: PhysicsClient) {
     scene.add(this.group);
     this.load();
+    this.syncConveyors();
   }
 
   get gradeName(): string { return GRADES[this.grade].name; }
@@ -157,15 +156,6 @@ export class Build {
     this.save();
   }
 
-  fieldAt(x: number, y: number, z: number): { x: number; z: number } | null {
-    const level = Math.round(y / FLOOR_H);
-    if (Math.abs(y - level * FLOOR_H) > 1.2) return null;
-    const p = this.parts.get(keyOf(Math.round(x / CELL), Math.round(z / CELL), level));
-    if (!p || p.type !== 'conveyor') return null;
-    const d = DIRV[p.dir];
-    return { x: d.x * CONVEYOR_SPEED, z: d.z * CONVEYOR_SPEED };
-  }
-
   // ---- internals ------------------------------------------------------------
 
   private place(part: Part): void {
@@ -177,48 +167,30 @@ export class Build {
     mesh.position.copy(cellToWorld(part.col, part.row, part.level));
     this.group.add(mesh);
     this.meshes.set(k, mesh);
-    this.bodies.set(k, this.makeColliders(part, k));
+    this.physics.addPart(k, colliderSpecs(part), part.type === 'host-sink' ? part.port : undefined);
+    if (part.type === 'conveyor') this.syncConveyors();
   }
 
   private remove(col: number, row: number, level: number): void {
     const k = keyOf(col, row, level);
     const mesh = this.meshes.get(k);
     if (mesh) { this.group.remove(mesh); this.meshes.delete(k); }
-    for (const b of this.bodies.get(k) ?? []) this.physics.world.removeRigidBody(b);
-    this.bodies.delete(k);
-    const sensor = this.sinkSensors.get(k);
-    if (sensor !== undefined) { this.physics.binByCollider.delete(sensor); this.sinkSensors.delete(k); }
+    const had = this.parts.get(k);
+    this.physics.removePart(k);
     this.parts.delete(k);
+    if (had?.type === 'conveyor') this.syncConveyors();
   }
 
-  private makeColliders(part: Part, k: string): RAPIER.RigidBody[] {
-    const w = cellToWorld(part.col, part.row, part.level);
-    switch (part.type) {
-      case 'platform':
-        return [this.physics.addFixedCuboid(CELL * 0.5, 0.15, CELL * 0.5, w.x, w.y, w.z).parent()!];
-      case 'conveyor':
-        return [this.physics.addFixedCuboid(CELL * 0.48, 0.15, CELL * 0.48, w.x, w.y, w.z).parent()!];
-      case 'ramp':
-        return [this.physics.addInclinedSlab(CELL * 0.5, 0.15, CELL * 0.62, w.x, w.y, w.z, part.dir, GRADES[part.grade ?? 1].angle).parent()!];
-      case 'host-spawn':
-        return [this.physics.addFixedCuboid(CELL * 0.4, 0.6, CELL * 0.4, w.x, w.y + 0.6, w.z).parent()!];
-      default: { // host-sink: four walls + a catch sensor
-        const half = CELL * 0.46, h = 1.6, t = 0.18;
-        const bodies: RAPIER.RigidBody[] = [];
-        const sides: [number, number, number, number, number, number][] = [
-          [half, h / 2, t, w.x, w.y + h / 2, w.z + half],
-          [half, h / 2, t, w.x, w.y + h / 2, w.z - half],
-          [t, h / 2, half, w.x + half, w.y + h / 2, w.z],
-          [t, h / 2, half, w.x - half, w.y + h / 2, w.z],
-        ];
-        for (const [hx, hy, hz, sx, sy, sz] of sides) bodies.push(this.physics.addFixedCuboid(hx, hy, hz, sx, sy, sz).parent()!);
-        const sensor = this.physics.addFixedCuboid(half - 0.25, h * 0.6, half - 0.25, w.x, w.y + h * 0.6, w.z, true);
-        this.physics.binByCollider.set(sensor.handle, part.port!);
-        this.sinkSensors.set(k, sensor.handle);
-        bodies.push(sensor.parent()!);
-        return bodies;
-      }
+  /** Send the current set of conveyor cells to the worker (it applies the
+   *  friction drive there). */
+  private syncConveyors(): void {
+    const cells: ConveyorCell[] = [];
+    for (const p of this.parts.values()) {
+      if (p.type !== 'conveyor') continue;
+      const d = DIRV[p.dir];
+      cells.push({ cx: p.col, cz: p.row, level: p.level, dx: d.x, dz: d.z, speed: CONVEYOR_SPEED });
     }
+    this.physics.setConveyors(cells);
   }
 
   private refreshGhost(): void {
@@ -240,6 +212,37 @@ export class Build {
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) for (const p of JSON.parse(raw) as Part[]) this.place(p);
     } catch { /* nothing saved */ }
+  }
+}
+
+// ---- colliders (sent to the worker) -----------------------------------------
+
+function rampQuat(dir: number, tilt: number): THREE.Quaternion {
+  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), tilt);
+  const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dir * Math.PI / 2);
+  return new THREE.Quaternion().multiplyQuaternions(qy, qx); // matches the mesh's Ry*Rx
+}
+
+function colliderSpecs(part: Part): ColliderSpec[] {
+  const w = cellToWorld(part.col, part.row, part.level);
+  switch (part.type) {
+    case 'platform': return [{ hx: CELL * 0.5, hy: 0.15, hz: CELL * 0.5, x: w.x, y: w.y, z: w.z }];
+    case 'conveyor': return [{ hx: CELL * 0.48, hy: 0.15, hz: CELL * 0.48, x: w.x, y: w.y, z: w.z }];
+    case 'ramp': {
+      const q = rampQuat(part.dir, GRADES[part.grade ?? 1].angle);
+      return [{ hx: CELL * 0.5, hy: 0.15, hz: CELL * 0.62, x: w.x, y: w.y, z: w.z, rot: [q.x, q.y, q.z, q.w] }];
+    }
+    case 'host-spawn': return [{ hx: CELL * 0.4, hy: 0.6, hz: CELL * 0.4, x: w.x, y: w.y + 0.6, z: w.z }];
+    default: { // host-sink: four walls + a catch sensor (sinkPort set by addPart)
+      const half = CELL * 0.46, h = 1.6, t = 0.18;
+      return [
+        { hx: half, hy: h / 2, hz: t, x: w.x, y: w.y + h / 2, z: w.z + half },
+        { hx: half, hy: h / 2, hz: t, x: w.x, y: w.y + h / 2, z: w.z - half },
+        { hx: t, hy: h / 2, hz: half, x: w.x + half, y: w.y + h / 2, z: w.z },
+        { hx: t, hy: h / 2, hz: half, x: w.x - half, y: w.y + h / 2, z: w.z },
+        { hx: half - 0.25, hy: h * 0.6, hz: half - 0.25, x: w.x, y: w.y + h * 0.6, z: w.z, sensor: true },
+      ];
+    }
   }
 }
 

@@ -5,13 +5,11 @@
 // (→ Web Worker, fewer active balls, sleep tuning). If render ms dominates,
 // it's the GPU/instancing side.
 export interface PerfInput {
-  dtMs: number;       // wall time since last frame
-  physicsMs: number;  // world.step()
-  renderMs: number;   // renderer.render()
+  dtMs: number;       // wall time since last main-thread frame
+  workerMs: number;   // worker's last physics step (off-thread)
+  renderMs: number;   // renderer.render() on the main thread
   active: number;     // balls in play
-  awake: number;      // non-sleeping balls
-  bodies: number;     // rapier rigid bodies (balls + part bodies)
-  colliders: number;
+  awake: number;      // non-sleeping balls (what the solver pays for)
   spawnedTotal: number;
   deliveredTotal: number;
   droppedTotal: number;
@@ -45,9 +43,10 @@ export class Perf {
 
   frame(now: number, p: PerfInput): void {
     this.fps = ewma(this.fps, 1000 / Math.max(p.dtMs, 0.0001));
-    this.phys = ewma(this.phys, p.physicsMs);
+    this.phys = ewma(this.phys, p.workerMs);
     this.rend = ewma(this.rend, p.renderMs);
-    this.other = ewma(this.other, Math.max(0, p.dtMs - p.physicsMs - p.renderMs));
+    // main-thread time NOT in render = controls + reading the transform buffer.
+    this.other = ewma(this.other, Math.max(0, p.dtMs - p.renderMs));
     this.worstAcc = Math.max(this.worstAcc, p.dtMs);
     this.hist.push(p.dtMs);
     if (this.hist.length > 60) this.hist.shift();
@@ -80,13 +79,11 @@ export class Perf {
       row('frame', `${(1000 / Math.max(this.fps, 1)).toFixed(1)} ms`) +
       row('  worst/s', `${this.worst.toFixed(1)} ms`, this.worst > 33 ? '#ff6b6b' : '#9fb0c4') +
       `<div style="color:#53607a;margin:2px 0">${bar}</div>` +
-      row('physics', `${this.phys.toFixed(1)} ms`, physC) +
+      row('physics⚙', `${this.phys.toFixed(1)} ms`, physC) +
       row('render', `${this.rend.toFixed(1)} ms`) +
-      row('other', `${this.other.toFixed(1)} ms`) +
+      row('main-other', `${this.other.toFixed(1)} ms`) +
       `<hr style="border:0;border-top:1px solid #243044;margin:5px 0">` +
       row('balls', `${p.awake} awake / ${p.active}`, p.awake > 1500 ? '#ffd479' : '#cdd8e6') +
-      row('bodies', `${p.bodies}`) +
-      row('colliders', `${p.colliders}`) +
       `<hr style="border:0;border-top:1px solid #243044;margin:5px 0">` +
       row('spawn/s', `${this.rate.spawn}`) +
       row('deliver/s', `${this.rate.deliver}`, '#6fdc8c') +

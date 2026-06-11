@@ -1,10 +1,11 @@
 // Pigeon Ballpit — a second visualizer on the same engine.
 //
-// Every loft token becomes a BALL dropped from its ingress port's nozzle. You
-// route packets by routing balls: tilt the table (left-drag) to roll each ball
-// into a destination port's bin. A ball in a bin = deliver(port, frame); a ball
-// that falls out or ages past the loft TTL = drop(frame). Same Pigeon API the
-// belt game speaks (@pigeon/protocol) — nothing here knows about belts.
+// Every loft token becomes a BALL dropped from its ingress port's dock. You
+// route packets by routing balls (conveyors, ramps, chutes, gravity) into a
+// destination port's sink: a ball in a sink = deliver(port, frame); a ball that
+// falls out or ages past the loft TTL = drop(frame). Same Pigeon API the belt
+// game speaks (@pigeon/protocol). Physics runs in a Web Worker; this thread only
+// builds, renders, and relays deliveries to the loft.
 //
 //   ?sim=1          force the offline sim (two fake pods, no cluster)
 //   ?storm=2000     sim + a UDP storm at N pps (stress the ball factory)
@@ -16,10 +17,9 @@ import {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Scene } from './scene';
-import { Physics } from './physics';
+import { PhysicsClient } from './physics-client';
 import { Arena, portColor } from './arena';
-import { Balls } from './balls';
-import { Build, type Tool } from './build';
+import { Build, CELL, FLOOR_H, type Tool } from './build';
 import { Perf } from './perf';
 
 const params = new URLSearchParams(location.search);
@@ -35,12 +35,7 @@ function log(who: string, line: string): void {
   while (logEl.childElementCount > 14) logEl.lastChild!.remove();
 }
 
-const physics = await Physics.create();
 const view = new Scene(document.getElementById('app')!);
-new Arena(view.scene, physics); // floor + walls (host I/O is placeable now)
-const balls = new Balls(view.scene, physics);
-view.scene.add(balls.mesh);
-const build = new Build(view.scene, physics);
 const perf = new Perf();
 
 const ports = new Map<number, PortInfo>();
@@ -48,7 +43,23 @@ let state = 'connecting';
 let spawned = 0;
 let delivered = 0;
 let dropped = 0;
-let mismatched = 0; // balls landed in a bin, but caller had no record (already gone)
+
+// Physics + ball rendering live behind the worker client. Deliveries/losses
+// come back as events we relay to the loft.
+const BALL_RADIUS = 0.35;
+const physics = new PhysicsClient(view.scene, {
+  onSpawned(items) { spawned += items.length; },
+  onGone(deliveredList, droppedList) {
+    for (const [frameId, port] of deliveredList) {
+      bridge.deliver(port, frameId);
+      delivered++;
+    }
+    for (const frameId of droppedList) { bridge.drop(frameId); dropped++; }
+  },
+}, { cell: CELL, floorH: FLOOR_H, radius: BALL_RADIUS });
+
+new Arena(view.scene, physics); // floor + walls
+const build = new Build(view.scene, physics);
 
 function syncPorts(): void {
   build.syncPorts([...ports.values()].map((p) => ({ id: p.id, label: p.pod })));
@@ -68,12 +79,11 @@ const events: BridgeEvents = {
     if (!nozzle) { bridge.drop(token.id); return; } // no dock placed for it: free it
     const d = decodeFrame(token.snapshot, token.fullLen);
     const color = KIND_COLORS[d.kind] ?? 0xffffff;
-    if (balls.spawn(token.id, token.port, nozzle, color, performance.now())) {
-      spawned++;
-    } else {
-      bridge.drop(token.id); // factory full — shed load, counted
-      dropped++;
-    }
+    // a little deterministic jitter so a stream fans out instead of stacking
+    const jx = (((token.id * 2654435761) >>> 0) % 1000) / 1000 - 0.5;
+    const jz = (((token.id * 40503) >>> 0) % 1000) / 1000 - 0.5;
+    physics.spawn(token.id, nozzle, new THREE.Vector3(jx, -2, jz), BALL_RADIUS, color);
+    // spawned/dropped(full) are confirmed by the worker via onSpawned/onGone.
   },
   onStats(_stats: LoftStats) { /* counters surfaced via our own tallies for now */ },
   onLog: (who, line) => log(who, line),
@@ -151,40 +161,23 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === ']') build.setLevel(build.level + 1);
 });
 
-// ---- main loop --------------------------------------------------------------
+// ---- main loop (physics runs off-thread in the worker) ----------------------
 let lastHud = 0;
 let prevFrame = performance.now();
 function frame(now: number): void {
   const dtMs = now - prevFrame;
   prevFrame = now;
   controls.update();
-
-  const tp = performance.now();
-  balls.applyField((x, y, z) => build.fieldAt(x, y, z)); // conveyors push balls
-  const hits = physics.step();
-  const physicsMs = performance.now() - tp;
-
-  for (const [frameId, portId] of hits) {
-    if (balls.catch(frameId)) {
-      bridge.deliver(portId, frameId);
-      delivered++;
-      if (ports.get(portId)) log('deliver', `ball → ${ports.get(portId)!.pod}`);
-    } else {
-      mismatched++;
-    }
-  }
-  const expired = balls.sync(now);
-  for (const id of expired) { bridge.drop(id); dropped++; }
+  physics.render(); // pull the latest worker transforms into the InstancedMesh
 
   const tr = performance.now();
   view.render();
   const renderMs = performance.now() - tr;
 
-  const bs = balls.stats();
+  const s = physics.stats();
   perf.frame(now, {
-    dtMs, physicsMs, renderMs,
-    active: bs.active, awake: bs.awake,
-    bodies: physics.bodyCount(), colliders: physics.colliderCount(),
+    dtMs, workerMs: s.stepMs, renderMs,
+    active: s.active, awake: s.awake,
     spawnedTotal: spawned, deliveredTotal: delivered, droppedTotal: dropped,
   });
 
@@ -205,7 +198,7 @@ function renderHud(): void {
   const rampInfo = build.tool === 'ramp' ? ` <span style="color:#7b8aa0">(grade: ${build.gradeName} — G)</span>` : '';
   hudBody.innerHTML = `
     <div>state: <span class="k">${state}</span> · ports: ${ports.size}</div>
-    <div>balls in play: <span class="k">${balls.count}</span></div>
+    <div>balls in play: <span class="k">${physics.stats().active}</span></div>
     <div>delivered: <span class="k">${delivered}</span> · dropped: <span class="warn">${dropped}</span></div>
     <div style="margin-top:6px">${legend || '—'}</div>
     <div style="margin-top:6px;color:#7b8aa0">
