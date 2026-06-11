@@ -20,6 +20,8 @@ export class Vpn {
   private wgErr = '';
   private gwHost = loadGwHost();   // LAN address phones dial; '' = gateway default
   private showKeys = false;        // reveal private keys on screen (off by default)
+  private mode = loadMode();       // 'full' (all traffic) or 'split' (pigeon only)
+  private domain = 'pigeon.isp';   // network name, from the gateway
 
   show(): void {
     this.refresh(true);
@@ -36,12 +38,15 @@ export class Vpn {
     if (!force && this.el.contains(document.activeElement) &&
         (document.activeElement as HTMLElement).tagName === 'INPUT') return;
     try {
-      const q = this.gwHost ? `?host=${encodeURIComponent(this.gwHost)}` : '';
-      const r = await fetch(`/vpn/configs${q}`);
+      const qs = new URLSearchParams();
+      if (this.gwHost) qs.set('host', this.gwHost);
+      if (this.mode === 'split') qs.set('mode', 'split');
+      const r = await fetch(`/vpn/configs${qs.toString() ? '?' + qs : ''}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const body = await r.json();
       this.peers = body.peers ?? [];
       this.endpoint = body.endpoint ?? '';
+      this.domain = body.domain ?? this.domain;
       this.wgErr = '';
     } catch (e) {
       this.wgErr = (e as Error).message;
@@ -82,9 +87,11 @@ export class Vpn {
         </div>
       </div>`).join('');
     const reachable = this.gwHost && !/^(127\.|localhost$|.*\.localhost$)/.test(this.gwHost);
+    const full = this.mode !== 'split';
     return `
       <div class="sub"><b>On a phone:</b> open the WireGuard app → <b>＋</b> → <b>Scan from QR code</b>, point it at a code below,
-      connect. That device becomes its own host on the factory floor. On desktop, use <b>copy config</b> instead.</div>
+      connect. That device joins <b>${esc(this.domain)}</b> as its own host on the factory floor.
+      On desktop, use <b>copy config</b> instead.</div>
       <div class="card" style="max-width:760px">
         <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
           <label style="font-size:13px">Gateway address phones dial
@@ -95,6 +102,19 @@ export class Vpn {
           <label style="margin-left:auto;font-size:13px;cursor:pointer">
             <input id="wg-showkeys" type="checkbox" ${this.showKeys ? 'checked' : ''}/> show private keys
           </label>
+        </div>
+        <div class="row" style="align-items:center;gap:8px;margin-top:8px">
+          <span style="font-size:13px">Tunnel mode</span>
+          <button data-mode="full" class="${full ? 'active' : ''}">Full — all traffic</button>
+          <button data-mode="split" class="${!full ? 'active' : ''}">Split — pigeon only</button>
+        </div>
+        <div class="sub" style="margin:6px 0 0;font-size:12px">
+          ${full
+            ? `<b>Full tunnel:</b> the device's <b>entire</b> internet (YouTube, apps, DNS) rides the pigeons — it only
+               works if you route those frames to the <code>uplink</code>. DNS &amp; the console live at
+               <code>${esc(this.domain)}</code> (try <code>http://ui.${esc(this.domain)}</code> once connected).`
+            : `<b>Split tunnel:</b> only <code>10.99.0.0/16</code> (pigeon hosts) goes through; everything else uses the
+               device's normal internet.`}
         </div>
         <div class="sub" style="margin:6px 0 0;font-size:12px">
           ${reachable
@@ -161,7 +181,22 @@ export class Vpn {
     }
     const showKeys = this.el.querySelector<HTMLInputElement>('#wg-showkeys');
     showKeys?.addEventListener('change', () => { this.showKeys = showKeys.checked; this.render(); });
+
+    this.el.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const m = b.dataset.mode as 'full' | 'split';
+        if (m === this.mode) return;
+        this.mode = m; saveMode(m); this.refresh(true); // re-fetch so configs + QR switch
+      }));
   }
+}
+
+const MODE_KEY = 'pigeon-wg-mode';
+function loadMode(): 'full' | 'split' {
+  try { return localStorage.getItem(MODE_KEY) === 'split' ? 'split' : 'full'; } catch { return 'full'; }
+}
+function saveMode(m: 'full' | 'split'): void {
+  try { localStorage.setItem(MODE_KEY, m); } catch { /* storage blocked */ }
 }
 
 const GW_HOST_KEY = 'pigeon-wg-host';

@@ -42,7 +42,13 @@ spec:
               tar xzf /src/loft-src.tgz -C /build
               cd /build
               CGO_ENABLED=0 go build -o /out/uplink ./cmd/uplink
-              exec /out/uplink -gateway 10.5.0.2:9777 -ip 10.99.0.1 -net 10.99.0.0/16
+              # -domain/-ui-* name the network and serve the console at
+              # ui.pigeon.isp (proxied to Traefik on the node). DNS for
+              # *.pigeon.isp is answered locally; the rest forwarded upstream.
+              exec /out/uplink -gateway 10.5.0.2:9777 -ip 10.99.0.1 -net 10.99.0.0/16 \
+                -domain pigeon.isp -upstream-dns 1.1.1.1:53 \
+                -ui-target http://10.5.0.2:80 -ui-host pigeon.localhost \
+                -loft-hosts http://10.5.0.2:9777/hosts
           volumeMounts:
             - name: src
               mountPath: /src

@@ -52,6 +52,8 @@ func main() {
 	peers := flag.Int("peers", 4, "number of peer slots to mint")
 	baseIP := flag.String("base-ip", "10.99.0.200", "first peer's aviary IP")
 	httpAddr := flag.String("http", ":8088", "config server listen address")
+	dns := flag.String("dns", "10.99.0.1", "DNS server pushed to clients (the uplink resolver)")
+	domain := flag.String("domain", "pigeon.isp", "search domain pushed to clients")
 	flag.Parse()
 
 	// Keys: derive from a stable seed (WG_SEED) when present, so the gateway
@@ -66,7 +68,7 @@ func main() {
 		log.Fatalf("bad base ip %s", *baseIP)
 	}
 
-	g := &gw{loftURL: "ws://" + *gateway + "/port", endpoint: *endpoint, gwPub: gwPub}
+	g := &gw{loftURL: "ws://" + *gateway + "/port", endpoint: *endpoint, gwPub: gwPub, dns: *dns, domain: *domain}
 	tdev := newChanTun(1420, g.fromPeer)
 	g.tun = tdev
 
@@ -121,6 +123,8 @@ type gw struct {
 	loftURL  string
 	endpoint string
 	gwPub    []byte
+	dns      string // resolver pushed to clients (uplink)
+	domain   string // search domain pushed to clients
 	tun      *chanTun
 	dev      *device.Device
 	mu       sync.Mutex
@@ -170,10 +174,30 @@ func (g *gw) toPeer(ippkt []byte) {
 
 // configFor renders the WireGuard client config for a peer at `endpoint`. Same
 // text whether it's copy-pasted (/configs) or encoded into a QR (/qr).
-func (g *gw) configFor(p *peer, endpoint string) string {
-	return fmt.Sprintf(
-		"[Interface]\nPrivateKey = %s\nAddress = %s/16\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 10.99.0.0/16\nPersistentKeepalive = 15\n",
-		p.privB64, p.ip.String(), base64.StdEncoding.EncodeToString(g.gwPub), endpoint)
+//
+// full tunnel  -> AllowedIPs 0.0.0.0/0 : ALL the device's traffic (YouTube, apps,
+//                 DNS) rides the tunnel and must be routed to the uplink or it
+//                 doesn't load — the pigeons carry your real internet.
+// split tunnel -> AllowedIPs 10.99.0.0/16 : only pigeon hosts go through; the
+//                 device uses its normal internet for everything else.
+func (g *gw) configFor(p *peer, endpoint string, full bool) string {
+	allowed := "10.99.0.0/16"
+	if full {
+		allowed = "0.0.0.0/0, ::/0"
+	}
+	iface := fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = %s/16\n", p.privB64, p.ip.String())
+	if g.dns != "" {
+		// wg-quick reads non-IP entries on the DNS line as the search domain.
+		iface += fmt.Sprintf("DNS = %s, %s\n", g.dns, g.domain)
+	}
+	return iface + fmt.Sprintf(
+		"\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\nPersistentKeepalive = 15\n",
+		base64.StdEncoding.EncodeToString(g.gwPub), endpoint, allowed)
+}
+
+// fullTunnel decides split vs full from the request (default full — the demo).
+func fullTunnel(r *http.Request) bool {
+	return r.URL.Query().Get("mode") != "split"
 }
 
 // resolveEndpoint swaps in a caller-supplied gateway host (e.g. the LAN IP a
@@ -259,9 +283,19 @@ func (g *gw) wgStatus() map[string]wgStat {
 
 func (g *gw) serveConfigs(w http.ResponseWriter, r *http.Request) {
 	ep := g.resolveEndpoint(r.URL.Query().Get("host"))
-	q := ""
+	full := fullTunnel(r)
+	// Carry host+mode onto the QR link so the scanned config matches what's
+	// shown.
+	qvals := url.Values{}
 	if h := sanitizeHost(r.URL.Query().Get("host")); h != "" {
-		q = "?host=" + url.QueryEscape(h)
+		qvals.Set("host", h)
+	}
+	if !full {
+		qvals.Set("mode", "split")
+	}
+	q := ""
+	if len(qvals) > 0 {
+		q = "?" + qvals.Encode()
 	}
 	stats := g.wgStatus()
 	now := time.Now().Unix()
@@ -275,7 +309,7 @@ func (g *gw) serveConfigs(w http.ResponseWriter, r *http.Request) {
 			hs = fmt.Sprint(now - st.handshakeSec) // seconds since last handshake
 		}
 		out = append(out, map[string]string{
-			"name": p.host.name, "ip": p.ip.String(), "config": g.configFor(p, ep),
+			"name": p.host.name, "ip": p.ip.String(), "config": g.configFor(p, ep, full),
 			"connected": fmt.Sprint(p.host.connected()),
 			"qr":        "/vpn/qr/" + p.host.name + ".png" + q,
 			"handshake": hs,
@@ -285,7 +319,10 @@ func (g *gw) serveConfigs(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"peers": out, "endpoint": ep})
+	json.NewEncoder(w).Encode(map[string]any{
+		"peers": out, "endpoint": ep, "domain": g.domain,
+		"mode": map[bool]string{true: "full", false: "split"}[full],
+	})
 }
 
 // serveQR returns a PNG QR code of a peer's WireGuard config, ready to scan
@@ -307,7 +344,7 @@ func (g *gw) serveQR(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := ""
 	if match != nil {
-		cfg = g.configFor(match, g.resolveEndpoint(r.URL.Query().Get("host")))
+		cfg = g.configFor(match, g.resolveEndpoint(r.URL.Query().Get("host")), fullTunnel(r))
 	}
 	g.mu.Unlock()
 

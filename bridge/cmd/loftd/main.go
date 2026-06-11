@@ -222,6 +222,26 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(stats)
 	})
+	// /hosts: the live name->IP registry of every roosted host (local + remote),
+	// so the uplink's DNS resolver can answer <pod>.<domain> on the pigeon net.
+	http.HandleFunc("/hosts", func(w http.ResponseWriter, r *http.Request) {
+		type host struct {
+			Name      string `json:"name"`
+			IP        string `json:"ip"`
+			Namespace string `json:"namespace"`
+		}
+		l.mu.Lock()
+		out := []host{}
+		for _, p := range l.ports {
+			out = append(out, host{p.Pod, p.IP, p.Namespace})
+		}
+		for _, rp := range l.remotePorts {
+			out = append(out, host{rp.meta.Pod, rp.meta.IP, rp.meta.Namespace})
+		}
+		l.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"hosts": out})
+	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		l.mu.Lock()
 		out := map[string]any{
