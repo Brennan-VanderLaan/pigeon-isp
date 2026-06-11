@@ -13,10 +13,12 @@ import {
   SimBridge, WsBridge, defaultBridgeUrl, decodeFrame, KIND_COLORS,
   type Bridge, type BridgeEvents, type FrameToken, type LoftStats, type PortInfo,
 } from '@pigeon/protocol';
+import * as THREE from 'three';
 import { Scene } from './scene';
 import { Physics } from './physics';
 import { Arena, portColor } from './arena';
 import { Balls } from './balls';
+import { Build, type Tool } from './build';
 
 const params = new URLSearchParams(location.search);
 const stormPps = Number(params.get('storm') ?? 0);
@@ -36,6 +38,7 @@ const view = new Scene(document.getElementById('app')!);
 const arena = new Arena(view.scene, physics);
 const balls = new Balls(view.scene, physics);
 view.scene.add(balls.mesh);
+const build = new Build(view.scene, physics);
 
 const ports = new Map<number, PortInfo>();
 let state = 'connecting';
@@ -95,23 +98,42 @@ if (forceSim) {
   ws.connect();
 }
 
-// ---- tilt control: left-drag leans gravity to roll the balls ----------------
+// ---- input: RIGHT-drag tilts the table, LEFT builds -------------------------
 const MAX_TILT = 14;
-let tiltX = 0, tiltZ = 0, dragging = false, sx = 0, sy = 0;
+let tiltX = 0, tiltZ = 0, tilting = false, sx = 0, sy = 0;
 const canvas = view.renderer.domElement;
-canvas.addEventListener('pointerdown', (e) => { dragging = true; sx = e.clientX; sy = e.clientY; canvas.setPointerCapture(e.pointerId); });
-canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
-  tiltX = clamp(((e.clientX - sx) / window.innerWidth) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
-  tiltZ = clamp(((e.clientY - sy) / window.innerHeight) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button === 2) { tilting = true; sx = e.clientX; sy = e.clientY; canvas.setPointerCapture(e.pointerId); return; }
+  if (e.button === 0 && build.tool !== 'none') build.click();
 });
-canvas.addEventListener('pointerup', () => { dragging = false; });
+canvas.addEventListener('pointermove', (e) => {
+  ndc.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, view.camera);
+  build.hoverAt(raycaster.ray);
+  if (tilting) {
+    tiltX = clamp(((e.clientX - sx) / window.innerWidth) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
+    tiltZ = clamp(((e.clientY - sy) / window.innerHeight) * 2 * MAX_TILT, -MAX_TILT, MAX_TILT);
+  }
+});
+canvas.addEventListener('pointerup', () => { tilting = false; });
 function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : v > hi ? hi : v; }
+
+const TOOL_KEYS: Record<string, Tool> = { '1': 'none', '2': 'conveyor', '3': 'chute', '0': 'erase' };
+window.addEventListener('keydown', (e) => {
+  if (e.key in TOOL_KEYS) build.setTool(TOOL_KEYS[e.key]);
+  else if (e.key === 'r' || e.key === 'R') build.rotate();
+  else if (e.key === '[') build.setLevel(build.level - 1);
+  else if (e.key === ']') build.setLevel(build.level + 1);
+});
 
 // ---- main loop --------------------------------------------------------------
 let lastHud = 0;
 function frame(now: number): void {
-  if (!dragging) { tiltX *= 0.9; tiltZ *= 0.9; } // ease back to level
+  if (!tilting) { tiltX *= 0.9; tiltZ *= 0.9; } // ease back to level
   physics.setTilt(tiltX, tiltZ);
 
   const hits = physics.step();
@@ -125,6 +147,7 @@ function frame(now: number): void {
     }
   }
 
+  balls.applyField((x, y, z) => build.fieldAt(x, y, z)); // conveyors push balls
   const expired = balls.sync(now);
   for (const id of expired) { bridge.drop(id); dropped++; }
 
@@ -143,5 +166,9 @@ function renderHud(): void {
     <div>balls in play: <span class="k">${balls.count}</span></div>
     <div>delivered: <span class="k">${delivered}</span> · dropped: <span class="warn">${dropped}</span></div>
     <div style="margin-top:6px">${legend || '—'}</div>
-    <div style="margin-top:6px;color:#7b8aa0">left-drag to tilt · wheel to zoom</div>`;
+    <div style="margin-top:6px;color:#7b8aa0">
+      tool: <span class="k">${build.tool}</span> · level <span class="k">${build.level}</span><br>
+      <b>1</b> none · <b>2</b> conveyor · <b>3</b> chute · <b>0</b> erase · <b>R</b> rotate · <b>[ ]</b> level<br>
+      right-drag tilt · left-click build · wheel zoom
+    </div>`;
 }

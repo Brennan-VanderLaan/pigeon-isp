@@ -81,6 +81,19 @@ export class Balls {
     return true;
   }
 
+  /** Apply a horizontal velocity field (e.g. conveyors) to balls over it.
+   *  fn returns the target horizontal velocity at a world point, or null. */
+  applyField(fn: (x: number, y: number, z: number) => { x: number; z: number } | null): void {
+    for (const rec of this.active.values()) {
+      const t = rec.handle.body.translation();
+      const v = fn(t.x, t.y, t.z);
+      if (v) {
+        const lv = rec.handle.body.linvel();
+        rec.handle.body.setLinvel({ x: v.x, y: lv.y, z: v.z }, true); // true = wake
+      }
+    }
+  }
+
   /** Sync instance transforms from physics; return frames that aged out or fell
    *  off the world (caller drops them to free the loft buffer). */
   sync(nowMs: number): number[] {

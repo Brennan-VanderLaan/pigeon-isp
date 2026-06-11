@@ -1,4 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-compat';
+import * as THREE from 'three';
 
 // Thin wrapper over Rapier. Kept deliberately behind this interface so the
 // whole simulation can later move into a Web Worker (the perf path for tens of
@@ -34,6 +35,20 @@ export class Physics {
     const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
     const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz).setFriction(0.7).setRestitution(0.15);
     if (sensor) desc.setSensor(true).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+    return this.world.createCollider(desc, body);
+  }
+
+  /** A fixed slab tilted `tilt` radians about its local X then yawed by dir —
+   *  matches the chute mesh's Ry*Rx composition, so collider and visual agree. */
+  addInclinedSlab(hx: number, hy: number, hz: number, x: number, y: number, z: number, dir: number, tilt: number): RAPIER.Collider {
+    const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), tilt);
+    const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dir * Math.PI / 2);
+    const q = new THREE.Quaternion().multiplyQuaternions(qy, qx);
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
+    const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+      .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
+      .setFriction(0.45)
+      .setRestitution(0.1);
     return this.world.createCollider(desc, body);
   }
 
