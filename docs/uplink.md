@@ -29,6 +29,29 @@ built a belt path carrying the pod's egress frames to the uplink's landing
 (and replies back to the pod). No path → off-net traffic goes nowhere, which
 is correct.
 
+## The named gateway: DNS and the console, over the tunnel
+
+The uplink's TUN owns `10.99.0.1/16`, so any service bound to 10.99.0.1 is
+delivered to locally (and replies ride the same return path). The uplink runs
+two more services there, so the one gateway you route to gives you the whole
+internet experience:
+
+- **DNS resolver** on `10.99.0.1:53`. Answers `*.pigeon.isp` from the loft
+  `/hosts` registry — `alice.pigeon.isp` → alice's aviary IP — plus gateway
+  aliases (`ui`/`gateway`/`router`/`pigeon` → 10.99.0.1). Everything else is
+  forwarded to an upstream resolver (`1.1.1.1` by default). DNS only resolves
+  if you carried the query to the uplink, so even name lookup is routed.
+- **UI reverse-proxy** on `10.99.0.1:80` → Traefik (Host rewritten to
+  `pigeon.localhost`). A joined VPN device can open **http://ui.pigeon.isp**
+  and reach the management console — but only over the tunnel, so it's gated
+  by VPN membership.
+
+This is what makes **full-tunnel WireGuard** usable: a phone with
+`AllowedIPs = 0.0.0.0/0` and `DNS = 10.99.0.1` sends *all* its traffic —
+YouTube, apps, DNS — into the tunnel, and it only loads if you route those
+frames to the uplink. Load a webpage on your phone and watch it leave as
+pigeons. See [edge.md](edge.md) for the client side.
+
 ## Build your own firewall
 
 The egress path runs through your factory, so it runs through your machines.
