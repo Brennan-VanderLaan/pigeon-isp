@@ -15,39 +15,70 @@ the reply back. Then keep the ICMP echoes flowing until `ping` prints
 
 ## Quickstart
 
-Requirements: Docker Desktop, `talosctl`, `kubectl`, Node 20+ (only for local
-game dev), PowerShell.
+You need, on PATH: **Docker Desktop** (running), **`talosctl`**, **`kubectl`**,
+**`tar`** (Git-for-Windows / built-in Win10+), and **PowerShell**. Node 20+ is
+only needed for local game dev and the `tools/` consumer. No container
+registry, no cloud, no accounts — everything builds itself inside the cluster
+from source.
 
 ```powershell
-.\cluster\up.ps1            # ephemeral 3-node Talos cluster, throwaway PKI, ~5 min
-# game + speedtest + health:  http://pigeon.localhost   (served from the cluster)
-# argocd:                     http://argocd.localhost
-node tools\autoroute.mjs    # attach a router (or play the game and build belts)
-.\cluster\ping-test.ps1     # alice pings bob ACROSS NODES through your routing
-.\cluster\down.ps1          # burn it all down; nothing is left behind
+git clone <repo> ; cd pigeon-isp
+.\cluster\up.ps1                  # ephemeral Talos cluster, throwaway PKI, ~5-8 min
+#   open http://pigeon.localhost  — Factory / Hosts / Network / VPN / Speedtest / Health
+node tools\autoroute.mjs          # attach a headless router (or play: build belts yourself)
+.\cluster\ping-test.ps1           # alice pings bob across nodes, through your routing
+.\cluster\down.ps1                # burn it ALL down — PKI, nodes, everything
+
+# options
+.\cluster\up.ps1 -Workers 0       # single-node (faster bring-up)
+.\cluster\up.ps1 -SkipArgoCD      # skip the ArgoCD install
 ```
+
+**Ephemeral cluster, persistent factory.** Every cluster is throwaway — tear it
+down and rebuild from scratch any time. Your *factory* (belts, machines, host
+placement) lives in the browser's localStorage and is keyed by host identity,
+so the same hosts return to the same roosts on a rebuild and your routes still
+line up. Great for sharing: anyone can `up.ps1` from a clean machine and get an
+identical cluster.
 
 Game development without a cluster — the sim bridge runs two fake pods with a
 real ARP cache and ping loop:
 
 ```powershell
-cd game
-npm install
+cd game ; npm install
 npm run dev                 # http://localhost:5173/?sim=1
+npm test                    # the machine-logic test suite (decode, filters, switch, tables, meter)
 # benchmark mode: http://localhost:5173/?storm=2000   (UDP storm at 2000 pps)
 ```
+
+First run is slow (the cluster pulls Go modules and `npm install`s the game in
+pods). If `pigeon.localhost` doesn't resolve, your OS already maps `*.localhost`
+to loopback on Win/macOS; on Linux add `127.0.0.1 pigeon.localhost` to
+`/etc/hosts`.
 
 ## The pieces
 
 | Path        | What it is |
 |-------------|------------|
-| `game/`     | TypeScript + three.js webapp: the factory floor, plus **Speedtest** and **Health** tabs (speedtest-style baseline-vs-pigeon benchmarks, cluster/loft telemetry). |
-| `bridge/`   | One Go module, two binaries. `loftd`: AF_PACKET tap per aviary veth, token protocol, multi-node trunks (star control plane, mesh data plane). `pigeon-cni`: dual-mode CNI plugin. |
-| `tower/`    | In-cluster admin service: health, kubelet usage, and the `/api/run` benchmark trigger (iperf3, baseline path vs pigeon path). |
+| `game/`     | TypeScript + three.js webapp. Factory floor (belts, crossings, filters, hubs, multi-port switches, meters, MIDI, learn/lookup primitives) + **Hosts / Network / VPN / Speedtest / Health** tabs. |
+| `bridge/`   | One Go module. `loftd` (AF_PACKET tap + token protocol + multi-node trunks), `pigeon-cni` (dual-mode CNI), and the external-host agents: `perch`, `wggw` (WireGuard), `tunbridge` (IKEv2/VPN), `uplink` (NAT to the world). |
+| `tower/`    | In-cluster admin service: health, kubelet usage, runtime host spawning, periodic workloads, live pod shells, and the iperf3 speedtest. |
 | `tools/`    | `autoroute.mjs` — headless MAC-learning consumer (the "it could be scripts" proof, and the bench workhorse). |
 | `cluster/`  | `up.ps1 -Workers 2` / `down.ps1` Talos lifecycle + all manifests. |
 | `gitops/`   | ArgoCD app-of-apps. `up.ps1 -GitRepo <url>` points ArgoCD at your remote. |
-| `docs/`     | Architecture, the Pigeon API contract, performance model, roadmap. |
+| `docs/`     | [architecture](docs/architecture.md), the [Pigeon API](docs/pigeon-api.md) contract, [benchmarks](docs/benchmarks.md), [edge/VPN](docs/edge.md), [uplink](docs/uplink.md). |
+
+## Bring real hosts in, and route out to the world
+
+- **Spawn hosts at runtime** (Hosts tab / tower `/api/hosts`): any image, wired
+  only to the pigeon CNI — sandboxed by construction. Live pod shells (xterm)
+  and periodic workloads included.
+- **VPN in real devices** (VPN tab): WireGuard (per-peer configs, works today)
+  or IKEv2 (native phone/Windows clients). Each device becomes its own host on
+  the floor. See [docs/edge.md](docs/edge.md).
+- **Route out to the internet** via the **uplink** — a dual-homed NAT gateway.
+  Aviary pods `apt-get update` only if you carry their packets to it, so the
+  routing *is* your firewall. See [docs/uplink.md](docs/uplink.md).
 
 ## The one rule
 
