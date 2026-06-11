@@ -5,7 +5,7 @@
 //   0x02 deliver  game -> loftd  [1][u16 egressPort][u32 frameId]
 //   0x03 drop     game -> loftd  [1][u16 0][u32 frameId]
 // Text: JSON control (hello / port-added / port-removed / stats).
-import type { Bridge, BridgeEvents, PortInfo } from '../types';
+import type { Bridge, BridgeEvents, PortInfo } from './types';
 
 const MSG_TOKEN = 0x01;
 const MSG_DELIVER = 0x02;

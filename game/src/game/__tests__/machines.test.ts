@@ -1,7 +1,7 @@
 // Router lego logic — the algorithms that make a switch a switch. Player
 // bug reports about "my switch flooded a known host" land here.
 import { describe, expect, it } from 'vitest';
-import { decodeFrame } from '../../net/decode';
+import { decodeFrame } from '@pigeon/protocol';
 import {
   OPPOSITE, fdbRows, hubExits, meterStep, newMeterState, newSwitchState, switchStep,
 } from '../machines';

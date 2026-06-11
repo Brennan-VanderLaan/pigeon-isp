@@ -3,7 +3,7 @@
 // out the side. Field matchers cover the common cases; `custom` takes a raw
 // JS expression over the decoded frame for everything else — your router,
 // your rules.
-import type { Decoded } from '../net/decode';
+import type { Decoded } from '@pigeon/protocol';
 
 export interface FilterConfig {
   /** what to look at: a named field, or 'custom' for a JS expression */

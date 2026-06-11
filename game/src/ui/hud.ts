@@ -6,8 +6,8 @@ import {
 } from '../game/filters';
 import { CHORDS, FRAME_SOURCES, SCALES, noteName, type MidiCfg } from '../game/midi';
 import { KEY_FIELDS, type KeyField } from '../game/tables';
-import { hexDump, type Decoded } from '../net/decode';
-import type { FrameToken } from '../types';
+import { hexDump, type Decoded } from '@pigeon/protocol';
+import type { FrameToken } from '@pigeon/protocol';
 
 export type Tool = 'select' | 'belt' | 'cross' | 'filter' | 'hub' | 'switch' | 'meter' | 'midi' | 'learn' | 'lookup' | 'erase';
 

@@ -7,7 +7,7 @@
 // ?storm=<pps> adds a UDP packet storm from alice to bob — the benchmark for
 // "can the client survive a video stream". Payloads are token-only here too,
 // matching the live protocol's performance model.
-import type { Bridge, BridgeEvents, LoftStats, PortStats } from '../types';
+import type { Bridge, BridgeEvents, LoftStats, PortStats } from './types';
 
 // ---- frame builders ---------------------------------------------------------
 

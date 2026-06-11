@@ -87,7 +87,12 @@ $tmp = Join-Path $env:TEMP "pigeon-src"
 New-Item -ItemType Directory -Force $tmp | Out-Null
 tar -czf "$tmp\loft-src.tgz" -C "$repo\bridge" go.mod go.sum cmd
 if ($LASTEXITCODE -ne 0) { throw "failed to tar bridge source" }
-tar -czf "$tmp\game-src.tgz" -C "$repo\game" package.json index.html tsconfig.json vite.config.ts src
+# Ship game/ AND the shared protocol package (the app imports @pigeon/protocol
+# from ../protocol/src). Paths are relative to the repo root so they extract as
+# siblings under /build.
+tar -czf "$tmp\game-src.tgz" -C "$repo" `
+    game/package.json game/index.html game/tsconfig.json game/vite.config.ts game/src `
+    protocol/package.json protocol/tsconfig.json protocol/src
 if ($LASTEXITCODE -ne 0) { throw "failed to tar game source" }
 # Tar every .go file (tower grew past a single main.go).
 $towerGo = Get-ChildItem "$repo\tower" -Filter *.go | Select-Object -ExpandProperty Name

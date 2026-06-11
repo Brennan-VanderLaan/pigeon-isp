@@ -1,0 +1,12 @@
+{
+  "name": "@pigeon/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Pigeon API client: wire types, frame decode, and the loft consumer bridge (live + sim). Framework-agnostic — every visualizer builds on this.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

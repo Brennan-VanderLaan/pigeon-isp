@@ -9,7 +9,7 @@
 // Directions are absolute board compass (0=E 1=S 2=W 3=N), so the value a
 // Learn stores at one cell means the same physical direction at a Lookup a
 // few cells away.
-import type { Decoded } from '../net/decode';
+import type { Decoded } from '@pigeon/protocol';
 
 export type KeyField = 'eth.src' | 'eth.dst' | 'ip.src' | 'ip.dst' | 'l4.src' | 'l4.dst';
 

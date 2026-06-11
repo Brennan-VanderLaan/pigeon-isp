@@ -27,8 +27,10 @@ spec:
             - -ec
             - |
               mkdir -p /build
+              # tarball holds game/ and protocol/ as siblings (the app imports
+              # @pigeon/protocol via ../protocol/src — see vite.config.ts).
               tar xzf /src/game-src.tgz -C /build
-              cd /build
+              cd /build/game
               npm install --no-audit --no-fund
               npm run build
               cp -r dist/* /out/

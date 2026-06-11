@@ -15,8 +15,8 @@ import { Board, DIRS, COLS, ROWS } from './board';
 import { hubExits, meterStep } from './machines';
 import { midi, triggerMidi } from './midi';
 import { tableKey, tableLearn, tableLookup } from './tables';
-import { decodeFrame, KIND_COLORS, type Decoded } from '../net/decode';
-import type { Bridge, FrameToken } from '../types';
+import { decodeFrame, KIND_COLORS, type Decoded } from '@pigeon/protocol';
+import type { Bridge, FrameToken } from '@pigeon/protocol';
 
 const MAX_PIGEONS = 500;
 const MAX_QUEUE = 10000;

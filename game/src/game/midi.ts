@@ -91,7 +91,7 @@ export function noteName(n: number): string {
 // note, a chord, or an arpeggio.
 // ===========================================================================
 
-import type { Decoded } from '../net/decode';
+import type { Decoded } from '@pigeon/protocol';
 
 export interface MidiCfg {
   deviceId: string;

@@ -1,7 +1,7 @@
 // The filter logic contract. Every bug a player reports about "the machine
 // matched the wrong thing" lands here as a regression test.
 import { describe, expect, it } from 'vitest';
-import { decodeFrame } from '../../net/decode';
+import { decodeFrame } from '@pigeon/protocol';
 import { compileFilter, fieldByteRanges, filterExit, legacyExits, sampleFrame } from '../filters';
 import { ALICE_IP, ALICE_MAC, BOB_IP, FRAMES } from './frames';
 

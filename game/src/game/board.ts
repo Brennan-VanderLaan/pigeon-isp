@@ -7,7 +7,7 @@
 // Interior cells hold player-built machinery: belts and filter machines.
 // The floor persists to localStorage — your router survives a refresh.
 import * as THREE from 'three';
-import type { PortInfo } from '../types';
+import type { PortInfo } from '@pigeon/protocol';
 import {
   DIR_ARROWS, compileFilter, describeFilter, legacyExits, newFilterStats,
   type CompiledFilter, type FilterConfig, type FilterStats,
@@ -18,7 +18,7 @@ import {
 } from './machines';
 import { defaultMidiCfg, type MidiCfg } from './midi';
 import { newNamedTable, type KeyField, type NamedTable } from './tables';
-import type { Decoded } from '../net/decode';
+import type { Decoded } from '@pigeon/protocol';
 import type { Emission } from './pigeons';
 
 export const COLS = 28;

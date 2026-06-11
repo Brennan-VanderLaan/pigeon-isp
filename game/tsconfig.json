@@ -10,7 +10,11 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@pigeon/protocol": ["../protocol/src/index.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -2,7 +2,7 @@
 // Lookup over a shared table behaves like 802.1D, a player can reconstruct
 // the switch appliance by hand.
 import { describe, expect, it } from 'vitest';
-import { decodeFrame } from '../../net/decode';
+import { decodeFrame } from '@pigeon/protocol';
 import { newNamedTable, tableKey, tableLearn, tableLookup, tableRows } from '../tables';
 import { ALICE_MAC, BOB_MAC, FRAMES } from './frames';
 

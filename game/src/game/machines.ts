@@ -5,7 +5,7 @@
 // Direction convention: 0=east 1=south 2=west 3=north. A frame TRAVELING in
 // direction d entered the cell it's on FROM (d+2)%4.
 
-import type { Decoded } from '../net/decode';
+import type { Decoded } from '@pigeon/protocol';
 
 export const OPPOSITE = (dir: number): number => (dir + 2) % 4;
 

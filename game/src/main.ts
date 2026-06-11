@@ -13,12 +13,12 @@ import { Board, makeGhostBelt, makeGhostCrossing, makeGhostFilter, makeGhostHub,
 import { fdbRows } from './game/machines';
 import { midi, triggerMidi } from './game/midi';
 import { tableRows } from './game/tables';
-import { decodeFrame } from './net/decode';
+import { decodeFrame } from '@pigeon/protocol';
 import { sampleFrame } from './game/filters';
 import { PigeonManager, setSpeed } from './game/pigeons';
 import { World } from './game/world';
-import { SimBridge } from './net/simbridge';
-import { WsBridge, defaultBridgeUrl } from './net/wsbridge';
+import { SimBridge } from '@pigeon/protocol';
+import { WsBridge, defaultBridgeUrl } from '@pigeon/protocol';
 import { Health } from './ui/health';
 import { Hosts } from './ui/hosts';
 import { Network } from './ui/network';
@@ -26,7 +26,7 @@ import { Hud, type Tool } from './ui/hud';
 import { Speedtest } from './ui/speedtest';
 import { PodTerminal, restoreTerminals } from './ui/terminal';
 import { Vpn } from './ui/vpn';
-import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from './types';
+import type { Bridge, BridgeEvents, FrameToken, LoftStats, PortInfo } from '@pigeon/protocol';
 
 const params = new URLSearchParams(location.search);
 const stormPps = Number(params.get('storm') ?? 0);
