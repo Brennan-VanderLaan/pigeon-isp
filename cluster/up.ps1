@@ -9,7 +9,10 @@
 param(
     [int]$Workers = 2,
     [string]$GitRepo = "",
-    [switch]$SkipArgoCD
+    [switch]$SkipArgoCD,
+    [switch]$WithIKEv2   # also publish UDP 500/4500 for IKEv2 — OFF by default
+                         # because the host OS (Windows IPsec) often already
+                         # binds them, which would fail the whole cluster create.
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
@@ -38,13 +41,17 @@ if ($existing) {
     cmd /c "talosctl config merge `"$env:USERPROFILE\.talos\clusters\$clusterName\talosconfig`" 2>nul"
 } else {
     Write-Host "==> creating Talos cluster '$clusterName' (fresh PKI, no CNI)" -ForegroundColor Cyan
+    # 80=ingress, 9777=loft ws, 51820/udp=WireGuard. IKEv2 (500/4500) only with
+    # -WithIKEv2, since the host often already uses those.
+    $ports = "80:80/tcp,9777:9777/tcp,51820:51820/udp"
+    if ($WithIKEv2) { $ports += ",500:500/udp,4500:4500/udp" }
     # --wait=false: with no CNI the health check would wait forever for Ready
     # nodes; WE are the thing that makes them Ready.
     talosctl cluster create `
         --name $clusterName `
         --provisioner docker `
         --workers $Workers `
-        --exposed-ports "80:80/tcp,9777:9777/tcp,51820:51820/udp,500:500/udp,4500:4500/udp" `
+        --exposed-ports $ports `
         --config-patch "@$PSScriptRoot\talos-patch.yaml" `
         --wait=false
     if ($LASTEXITCODE -ne 0) { throw "talosctl cluster create failed" }
@@ -107,7 +114,11 @@ kubectl -n pigeon-system create configmap tower-src --from-file="$tmp\tower-src.
 kubectl apply -f "$PSScriptRoot\manifests\tower\"
 
 Write-Host "==> deploying the WireGuard VPN gateway" -ForegroundColor Cyan
-kubectl apply -f "$PSScriptRoot\manifests\vpn\"
+kubectl apply -f "$PSScriptRoot\manifests\vpn\wg-gateway.yaml"
+if ($WithIKEv2) {
+    Write-Host "==> deploying the IKEv2 gateway (experimental)" -ForegroundColor Cyan
+    kubectl apply -f "$PSScriptRoot\manifests\vpn\ikev2.yaml"
+}
 
 Write-Host "==> deploying the uplink gateway (aviary -> the world, when you route it)" -ForegroundColor Cyan
 kubectl apply -f "$PSScriptRoot\manifests\uplink\"
