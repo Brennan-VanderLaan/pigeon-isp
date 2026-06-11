@@ -43,6 +43,29 @@ no-silent-drop rule holds: every ball ends as a deliver or a counted drop.
 - **vehicles** — kinematic character bodies you drive (WASD / on-screen);
   push/scoop forces on contacted balls.
 
+## Multiplayer (a core pillar, like Rokenbok)
+
+Rokenbok is co-op: friends each drive a vehicle to make one factory work.
+Ballpit must support the same — several players operating the SAME factory at
+once. Physics isn't deterministic across browsers, so the model is an
+**authoritative sim**:
+
+- One process owns the Rapier world and is the loft's single **router**
+  consumer (it decides every token by where its balls land). Candidates: a
+  headless Node/Go "ballpit server", or the tower.
+- Players connect to that server (WebSocket): they receive ball + vehicle +
+  part **transforms** (compact binary, like the loft's token stream) and the
+  build state; they send **inputs** (vehicle controls, part placements).
+- The server is the source of truth; clients render and predict. This reuses
+  the exact pattern the loft already proves — one authority, many attached
+  peers — just for the physical layer instead of the frame layer.
+
+Until the server exists, the client runs the sim locally (single-player /
+prototype). The `Physics` interface + transform-buffer rendering are written so
+the authority can move out of the browser without touching gameplay code: the
+same step→transforms→render loop, sourced from the network instead of local
+Rapier.
+
 ## Performance plan (tens of thousands of balls)
 
 1. InstancedMesh rendering — done (one draw call).
@@ -62,6 +85,14 @@ thousands per frame on the main thread; the worker + sleeping is what buys the
 2. **Construction core**: build grid + levels, part registry, placement UI;
    Host Spawner / Host Sink / Conveyor / Chute as the first parts.
 3. **Router parts**: Sorter (by frame field), Lift, Launcher, merger/splitter.
-4. **Vehicles**: drivable dozer/loader; pick-up & dump.
-5. **Verticality UX**: level selector, ghost floors, cutaway camera.
-6. **Polish**: save/share factories, ball trails, sound, the win states.
+4. **Vehicles**: drivable bots; pick-up & dump. Wishlist (Brennan's favorites):
+   - **Street sweeper** — vacuums balls from the front, accumulates them in a
+     dump-truck bed at the back, tips them into a chute/sink.
+   - **Monorail** — an elevated track line that carries balls between stations.
+   - **Electric sorters** — powered diverters that flick balls down different
+     lanes by a frame field (the Sorter part, motorized).
+5. **Multiplayer**: authoritative ballpit server (owns Rapier + is the loft
+   router); clients stream transforms in, inputs out. Co-op driving, shared
+   build. The big one.
+6. **Verticality UX**: level selector, ghost floors, cutaway camera.
+7. **Polish**: save/share factories, ball trails, sound, the win states.

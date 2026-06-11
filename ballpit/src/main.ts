@@ -35,7 +35,7 @@ function log(who: string, line: string): void {
 
 const physics = await Physics.create();
 const view = new Scene(document.getElementById('app')!);
-const arena = new Arena(view.scene, physics);
+new Arena(view.scene, physics); // floor + walls (host I/O is placeable now)
 const balls = new Balls(view.scene, physics);
 view.scene.add(balls.mesh);
 const build = new Build(view.scene, physics);
@@ -46,22 +46,22 @@ let delivered = 0;
 let dropped = 0;
 let mismatched = 0; // balls landed in a bin, but caller had no record (already gone)
 
-function relayout(): void {
-  arena.setPorts([...ports.values()].map((p) => ({ id: p.id, label: p.pod })));
+function syncPorts(): void {
+  build.syncPorts([...ports.values()].map((p) => ({ id: p.id, label: p.pod })));
 }
 
 const events: BridgeEvents = {
   onHello(list) {
     ports.clear();
     for (const p of list) ports.set(p.id, p);
-    relayout();
+    syncPorts();
     log('loft', `hello: ${list.length} port(s)`);
   },
-  onPortAdded(p) { ports.set(p.id, p); relayout(); log('loft', `port up: ${p.pod}`); },
-  onPortRemoved(id) { ports.delete(id); relayout(); log('loft', `port down: ${id}`); },
+  onPortAdded(p) { ports.set(p.id, p); syncPorts(); log('loft', `port up: ${p.pod}`); },
+  onPortRemoved(id) { ports.delete(id); syncPorts(); log('loft', `port down: ${id}`); },
   onToken(token: FrameToken) {
-    const nozzle = arena.nozzleFor(token.port);
-    if (!nozzle) { bridge.drop(token.id); return; } // unknown ingress: free it
+    const nozzle = build.spawnPosFor(token.port);
+    if (!nozzle) { bridge.drop(token.id); return; } // no dock placed for it: free it
     const d = decodeFrame(token.snapshot, token.fullLen);
     const color = KIND_COLORS[d.kind] ?? 0xffffff;
     if (!balls.spawn(token.id, token.port, nozzle, color, performance.now())) {
@@ -122,10 +122,13 @@ canvas.addEventListener('pointermove', (e) => {
 canvas.addEventListener('pointerup', () => { tilting = false; });
 function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : v > hi ? hi : v; }
 
-const TOOL_KEYS: Record<string, Tool> = { '1': 'none', '2': 'conveyor', '3': 'chute', '0': 'erase' };
+const TOOL_KEYS: Record<string, Tool> = {
+  '1': 'none', '2': 'conveyor', '3': 'chute', '4': 'host', '5': 'sink', '0': 'erase',
+};
 window.addEventListener('keydown', (e) => {
   if (e.key in TOOL_KEYS) build.setTool(TOOL_KEYS[e.key]);
   else if (e.key === 'r' || e.key === 'R') build.rotate();
+  else if (e.key === 'h' || e.key === 'H') build.cyclePort();
   else if (e.key === '[') build.setLevel(build.level - 1);
   else if (e.key === ']') build.setLevel(build.level + 1);
 });
@@ -157,18 +160,23 @@ function frame(now: number): void {
 }
 requestAnimationFrame(frame);
 
+function hex(c: number): string { return '#' + c.toString(16).padStart(6, '0'); }
 function renderHud(): void {
   const legend = [...ports.values()]
-    .map((p) => `<span style="color:#${portColor(p.id).toString(16).padStart(6, '0')}">●</span> ${p.pod}`)
+    .map((p) => {
+      const sel = p.id === build.selectedPort;
+      return `<span style="color:${hex(portColor(p.id))}">●</span> <span style="${sel ? 'text-decoration:underline;color:#fff' : ''}">${p.pod}</span>`;
+    })
     .join('  ');
+  const selName = build.selectedPort !== null ? (ports.get(build.selectedPort)?.pod ?? '?') : '—';
   hudBody.innerHTML = `
     <div>state: <span class="k">${state}</span> · ports: ${ports.size}</div>
     <div>balls in play: <span class="k">${balls.count}</span></div>
     <div>delivered: <span class="k">${delivered}</span> · dropped: <span class="warn">${dropped}</span></div>
     <div style="margin-top:6px">${legend || '—'}</div>
     <div style="margin-top:6px;color:#7b8aa0">
-      tool: <span class="k">${build.tool}</span> · level <span class="k">${build.level}</span><br>
-      <b>1</b> none · <b>2</b> conveyor · <b>3</b> chute · <b>0</b> erase · <b>R</b> rotate · <b>[ ]</b> level<br>
-      right-drag tilt · left-click build · wheel zoom
+      tool: <span class="k">${build.tool}</span> · level <span class="k">${build.level}</span> · host: <span class="k">${selName}</span><br>
+      <b>1</b> none · <b>2</b> conveyor · <b>3</b> chute · <b>4</b> dock · <b>5</b> sink · <b>0</b> erase<br>
+      <b>R</b> rotate · <b>H</b> next host · <b>[ ]</b> level · right-drag tilt · left build · wheel zoom
     </div>`;
 }
