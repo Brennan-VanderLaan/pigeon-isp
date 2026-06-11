@@ -137,6 +137,14 @@ func createHost(w http.ResponseWriter, r *http.Request) {
 		Spec: corev1.PodSpec{
 			TerminationGracePeriodSeconds: &grace,
 			Containers:                    []corev1.Container{c},
+			// Cluster DNS (10.96.0.10) is unreachable on the pigeon network,
+			// so apt/wget would hang resolving before sending a packet. Point
+			// at public resolvers instead — those queries become real frames
+			// that route out through the uplink gateway you build.
+			DNSPolicy: corev1.DNSNone,
+			DNSConfig: &corev1.PodDNSConfig{
+				Nameservers: []string{"1.1.1.1", "8.8.8.8"},
+			},
 		},
 	}
 	if req.TTLSeconds > 0 {
