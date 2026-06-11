@@ -777,6 +777,20 @@ export class Board {
     if (slotIdx >= 0) this.usedSlots.delete(slotIdx);
   }
 
+  /** Clear ALL placed ports (roost/landing meshes + placement bookkeeping)
+   *  WITHOUT touching belts/machines or the persisted identity->slot map. The
+   *  loft reassigns port ids every session, so on a fresh `hello` we wipe the
+   *  stale placement and re-add from the snapshot — each host returns to its
+   *  saved slot, so routes survive a reconnect. */
+  resetPorts(): void {
+    for (const [id, loc] of [...this.portLocs]) this.removePortVisuals(id, loc);
+    this.portLocs.clear();
+    this.usedSlots.clear();
+    this.idToIdent.clear();
+    for (const h of this.knownHosts.values()) h.present = false;
+    this.onHosts();
+  }
+
   removePort(id: number): void {
     const ident = this.idToIdent.get(id);
     if (ident) {

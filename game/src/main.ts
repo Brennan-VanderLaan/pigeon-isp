@@ -96,7 +96,12 @@ const pigeons = new PigeonManager(
 
 const events: BridgeEvents = {
   onHello(ports: PortInfo[]) {
+    // A fresh snapshot (first attach or RECONNECT). Port ids are reassigned
+    // every loft session, so wipe the stale placement and re-add — each host
+    // returns to its persisted slot, so existing belts keep pointing at the
+    // right host instead of getting bumped.
     portsById.clear();
+    board.resetPorts();
     for (const p of ports) {
       portsById.set(p.id, p);
       board.addPort(p);
