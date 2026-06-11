@@ -12,6 +12,8 @@ import { GpuParticles } from './gpu/particles';
 const FLOOR = 30, WALL_H = 2.4;
 const params = new URLSearchParams(location.search);
 const COUNT = Math.max(1, Math.min(Number(params.get('n') ?? 100_000), 2_000_000));
+const PRESSURE = params.has('press') ? Number(params.get('press')) : undefined;
+const GRAVITY = params.has('g') ? Number(params.get('g')) : undefined;
 
 const view = await Scene.create(document.getElementById('app')!);
 
@@ -39,7 +41,7 @@ controls.minDistance = 8;
 controls.maxDistance = 160;
 controls.update();
 
-const particles = new GpuParticles(view.renderer, COUNT);
+const particles = new GpuParticles(view.renderer, COUNT, { pressure: PRESSURE, gravity: GRAVITY });
 view.scene.add(particles.mesh);
 
 // minimal telemetry (top-right)
@@ -77,7 +79,9 @@ async function frame(): Promise<void> {
       `<span style="color:${c}">${fps.toFixed(0)} fps</span>\n` +
       `<span style="color:${cc}">compute ${comp.toFixed(2)} ms</span>\n` +
       `render ${rend.toFixed(2)} ms\n` +
-      `<span style="color:#7b8aa0">${COUNT.toLocaleString()} particles (GPU)</span>`;
+      `<span style="color:#7b8aa0">${COUNT.toLocaleString()} particles (GPU)\n` +
+      `pressure ${particles.pressure.value.toFixed(2)} · grid ${particles.gridCells.toLocaleString()} cells\n` +
+      `?n= count · ?press= · ?g= gravity</span>`;
   }
   requestAnimationFrame(() => { void frame(); });
 }
