@@ -21,6 +21,11 @@ const crossOriginIsolation = {
 export default defineConfig({
   plugins: [crossOriginIsolation],
   build: { target: 'es2022' },
+  // three's WebGPU/TSL entry points (three/webgpu, three/tsl) re-export in a way
+  // Vite's esbuild pre-bundler mangles ("does not provide an export named 'Fn'").
+  // Serve all of three as real ESM so the named exports survive and there's one
+  // consistent three instance (node classes match WebGPURenderer).
+  optimizeDeps: { exclude: ['three', 'three/webgpu', 'three/tsl', 'three/addons'] },
   server: { port: 5174 },
   preview: {
     port: 5174,
