@@ -46,13 +46,18 @@ export class GpuParticles {
   private gravity = uniform(-9.8);
   readonly stiffness = uniform(3.0); // EOS stiffness (exposed as ?press=)
   private restDensity = uniform(4.0);
-  private viscosity = uniform(0.1);
+  readonly viscosity = uniform(0.4); // higher = calmer (the main boil damper)
+  // one analytic box collider (grid velocity BC) — proves collider coupling
+  private boxCenter = uniform(vec3(0, 7, 0));
+  private boxHalf = uniform(vec3(7, 3.5, 7));
+  private boxOn = uniform(0);
 
-  constructor(renderer: WebGPURenderer, count: number, opts: { stiffness?: number; gravity?: number } = {}) {
+  constructor(renderer: WebGPURenderer, count: number, opts: { stiffness?: number; gravity?: number; viscosity?: number } = {}) {
     this.renderer = renderer;
     this.count = count;
     if (opts.stiffness !== undefined) this.stiffness.value = opts.stiffness;
     if (opts.gravity !== undefined) this.gravity.value = opts.gravity;
+    if (opts.viscosity !== undefined) this.viscosity.value = opts.viscosity;
 
     const positions = instancedArray(count, 'vec3');
     const velocities = instancedArray(count, 'vec3');
@@ -181,6 +186,16 @@ export class GpuParticles {
         If(cy.greaterThan(GY - 3).and(vy.greaterThan(0)), () => { vy.assign(0); });
         If(cz.lessThan(2).and(vz.lessThan(0)), () => { vz.assign(0); });
         If(cz.greaterThan(GZ - 3).and(vz.greaterThan(0)), () => { vz.assign(0); });
+        // analytic box collider: a node inside the box is "stuck" (zero velocity)
+        If(this.boxOn.greaterThan(0.5), () => {
+          const wx = float(ORIGIN).add(cx.mul(DX));
+          const wy = float(OY).add(cy.mul(DX));
+          const wz = float(ORIGIN).add(cz.mul(DX));
+          const inside = wx.sub((this.boxCenter as any).x).abs().lessThan((this.boxHalf as any).x)
+            .and(wy.sub((this.boxCenter as any).y).abs().lessThan((this.boxHalf as any).y))
+            .and(wz.sub((this.boxCenter as any).z).abs().lessThan((this.boxHalf as any).z));
+          If(inside, () => { vx.assign(0); vy.assign(0); vz.assign(0); });
+        });
         atomicStore(gVx.element(instanceIndex), enc(vx));
         atomicStore(gVy.element(instanceIndex), enc(vy));
         atomicStore(gVz.element(instanceIndex), enc(vz));
@@ -213,10 +228,31 @@ export class GpuParticles {
       C0.element(instanceIndex).assign(nc0);
       C1.element(instanceIndex).assign(nc1);
       C2.element(instanceIndex).assign(nc2);
-      const np = p.add(nv.mul(this.dt));
-      positions.element(instanceIndex).assign(vec3(
-        np.x.clamp(-LIM, LIM), np.y.clamp(0.3, OY + GY * DX - 2), np.z.clamp(-LIM, LIM),
-      ));
+      const adv = p.add(nv.mul(this.dt));
+      const np = vec3(
+        adv.x.clamp(-LIM, LIM), adv.y.clamp(0.3, OY + GY * DX - 2), adv.z.clamp(-LIM, LIM),
+      ).toVar() as any;
+      // Box collider, particle side: the grid BC only kills momentum inside the
+      // box — it does NOT stop slow creep through the surface, and a particle
+      // that gets in freezes (all-zero stencil). Project any particle found
+      // inside back out through its nearest face.
+      If(this.boxOn.greaterThan(0.5), () => {
+        const bc = this.boxCenter as any, bh = this.boxHalf as any;
+        const rel = np.sub(bc);
+        const penX = bh.x.sub(rel.x.abs());
+        const penY = bh.y.sub(rel.y.abs());
+        const penZ = bh.z.sub(rel.z.abs());
+        If(penX.greaterThan(0).and(penY.greaterThan(0)).and(penZ.greaterThan(0)), () => {
+          If(penX.lessThanEqual(penY).and(penX.lessThanEqual(penZ)), () => {
+            np.x.assign(bc.x.add(rel.x.sign().mul(bh.x)));
+          }).ElseIf(penY.lessThanEqual(penZ), () => {
+            np.y.assign(bc.y.add(rel.y.sign().mul(bh.y)));
+          }).Else(() => {
+            np.z.assign(bc.z.add(rel.z.sign().mul(bh.z)));
+          });
+        });
+      });
+      positions.element(instanceIndex).assign(np);
     })().compute(count) as CN;
 
     const geo = new THREE.IcosahedronGeometry(0.4, 0);
@@ -239,6 +275,13 @@ export class GpuParticles {
     c.computeAsync(this.p2g2Node);
     c.computeAsync(this.gridNode);
     return c.computeAsync(this.g2pNode);
+  }
+
+  /** Place the test box collider (world center + half-extents). */
+  setBox(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number): void {
+    (this.boxCenter.value as THREE.Vector3).set(cx, cy, cz);
+    (this.boxHalf.value as THREE.Vector3).set(hx, hy, hz);
+    this.boxOn.value = 1;
   }
 
   get gridCells(): number { return CELLS; }

@@ -14,6 +14,8 @@ const params = new URLSearchParams(location.search);
 const COUNT = Math.max(1, Math.min(Number(params.get('n') ?? 100_000), 2_000_000));
 const PRESSURE = params.has('press') ? Number(params.get('press')) : undefined;
 const GRAVITY = params.has('g') ? Number(params.get('g')) : undefined;
+const VISC = params.has('visc') ? Number(params.get('visc')) : undefined;
+const COLLIDER = params.has('box'); // ?box adds a static box obstacle to test collider coupling
 
 const view = await Scene.create(document.getElementById('app')!);
 
@@ -41,8 +43,21 @@ controls.minDistance = 8;
 controls.maxDistance = 160;
 controls.update();
 
-const particles = new GpuParticles(view.renderer, COUNT, { stiffness: PRESSURE, gravity: GRAVITY });
+const particles = new GpuParticles(view.renderer, COUNT, { stiffness: PRESSURE, gravity: GRAVITY, viscosity: VISC });
 view.scene.add(particles.mesh);
+
+// ?box — a static box obstacle the fluid must pour around (collider test)
+if (COLLIDER) {
+  const c = { x: 0, y: 7, z: 0, hx: 7, hy: 3.5, hz: 7 };
+  particles.setBox(c.x, c.y, c.z, c.hx, c.hy, c.hz);
+  const obstacle = new THREE.Mesh(
+    new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2),
+    new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.8 }),
+  );
+  obstacle.position.set(c.x, c.y, c.z);
+  obstacle.receiveShadow = true;
+  view.scene.add(obstacle);
+}
 
 // minimal telemetry (top-right)
 const hud = document.createElement('div');
