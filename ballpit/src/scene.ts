@@ -32,7 +32,12 @@ export class Scene {
 
   static async create(host: HTMLElement): Promise<Scene> {
     const v = new Scene();
-    const renderer = new WebGPURenderer({ antialias: true });
+    // The MLS-MPM compute kernels bind 9 storage buffers; the default per-stage
+    // limit is 8. Request a higher limit (adapters commonly support 16).
+    const renderer = new WebGPURenderer({
+      antialias: true,
+      requiredLimits: { maxStorageBuffersPerShaderStage: 16 },
+    } as any);
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;

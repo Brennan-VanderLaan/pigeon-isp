@@ -1,3 +1,5 @@
 node_modules
 dist
 *.exe
+telemetry.log
+telemetry-latest.json
