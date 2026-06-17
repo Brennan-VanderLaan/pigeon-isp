@@ -35,3 +35,11 @@ export type FromWorker =
   | { t: 'ready' }
   | { t: 'spawned'; items: { frameId: number; slot: number; color: number }[] }
   | { t: 'gone'; delivered: [number, number][]; dropped: number[] };
+
+/** What Arena/Build need from a physics backend — satisfied by both the CPU
+ *  worker client (PhysicsClient) and the GPU fluid (GpuFluid). */
+export interface PartsHost {
+  addPart(id: string, colliders: ColliderSpec[], sinkPort?: number): void;
+  removePart(id: string): void;
+  setConveyors(cells: ConveyorCell[]): void;
+}

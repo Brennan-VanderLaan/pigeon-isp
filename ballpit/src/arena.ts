@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PhysicsClient } from './physics-client';
+import type { PartsHost } from './proto';
 import type { ColliderSpec } from './proto';
 
 // The static play space: floor + perimeter walls. Meshes live here; the matching
@@ -15,7 +15,7 @@ export function portColor(id: number): number {
 }
 
 export class Arena {
-  constructor(scene: THREE.Scene, physics: PhysicsClient) {
+  constructor(scene: THREE.Scene, physics: PartsHost) {
     const colliders: ColliderSpec[] = [];
 
     const floorMat = new THREE.MeshStandardMaterial({ color: 0x161d28, roughness: 0.95 });

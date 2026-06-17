@@ -44,9 +44,9 @@ export class GpuParticles {
   private g2pNode: CN;
   private dt = uniform(1 / 60);
   private gravity = uniform(-9.8);
-  readonly stiffness = uniform(3.0); // EOS stiffness (exposed as ?press=)
+  readonly stiffness = uniform(1000); // EOS stiffness (exposed as ?press=; user-tuned)
   private restDensity = uniform(4.0);
-  readonly viscosity = uniform(0.4); // higher = calmer (the main boil damper)
+  readonly viscosity = uniform(0.6); // higher = calmer (the main boil damper)
   // one analytic box collider (grid velocity BC) — proves collider coupling
   private boxCenter = uniform(vec3(0, 7, 0));
   private boxHalf = uniform(vec3(7, 3.5, 7));
