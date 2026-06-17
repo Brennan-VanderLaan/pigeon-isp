@@ -6,6 +6,12 @@ skins. This one is a near-1:1 Rokenbok homage: you build a physical ball factory
 out of construction parts, drive vehicles, and route real packets by routing
 balls through it.
 
+> Want to build your *own* visualizer on the same stack? Read the consumer SDK
+> guide — [`protocol/README.md`](../protocol/README.md). Ballpit is the
+> worked example: every loft token becomes a ball (`onToken` → spawn), and a
+> ball reaching a sink is a `deliver` (a ball lost off the world is a `drop`).
+> That's the entire coupling between this game and the network.
+
 ## The mapping (Rokenbok ↔ packets)
 
 | Rokenbok thing | Ballpit part | Packet meaning |

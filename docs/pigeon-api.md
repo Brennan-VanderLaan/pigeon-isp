@@ -6,6 +6,12 @@ routing daemon must be able to take its place. Istio, but stranger: the mesh
 tap is a DaemonSet, and the routing logic is whatever application you point
 at this API.
 
+> This page is the **wire contract** — the bytes on the WebSocket, for writing a
+> consumer in any language. If you're building a TypeScript/browser demo, the
+> [`@pigeon/protocol`](../protocol/README.md) package wraps all of this in a
+> typed `Bridge`/`decodeFrame` API and a copy-pasteable quickstart; start there
+> and come back here only when you need the framing details.
+
 ## Concepts
 
 - **Loft** — one `loftd` per node. Owns every aviary veth on that node.
@@ -54,6 +60,7 @@ Loft → consumer:
 {"type":"port-added","port":Port}
 {"type":"port-removed","id":N}          port's frames in flight are ttl-dropped
 {"type":"stats", …}                     1 Hz; counters are cumulative
+{"type":"log","who":S,"line":S}         operational narration (see below)
 0x01 token   [u8 1][u16 port][u32 frameId][u32 fullLen][snapshot ≤128B]
 ```
 
@@ -70,6 +77,13 @@ Flooding (broadcast/unknown-unicast): `copy-deliver` to each egress, then
 not count as `drops.consumer` — it went somewhere.
 
 `Port` is `{id, ifname, mac, ip, pod, namespace}`.
+
+The `log` message is optional, human-facing narration — a greeting on attach,
+buffer backpressure (shedding started / drained), and peer health on multi-node.
+It is rate-limited and edge-triggered, never per-frame. The loft narrates only
+what it *observes*: it routes on headers and does not interpret them, so it
+emits no ARP/ping commentary (that's a consumer/sim concern). A consumer may
+ignore `log` entirely; it carries no routing semantics.
 
 Reserved (fast path, milestone 3): `0x10 offload-add` / `0x11 offload-remove`
 — consumer installs `match(5-tuple) → egress` so an established flow bypasses

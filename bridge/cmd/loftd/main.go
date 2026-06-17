@@ -18,6 +18,11 @@
 // `?mode=observe` attaches a read-only consumer: it sees tokens, ports and
 // stats but cannot route; the router role stays exclusive (latest wins).
 //
+// Text control messages to the consumer: hello / port-added / port-removed /
+// stats, plus {"type":"log","who","line"} — operational narration the loft
+// genuinely sees (attach greeting, buffer backpressure, peer health). It does
+// NOT narrate ARP/ping: the loft routes on headers, it doesn't interpret them.
+//
 // The no-silent-drop rule (docs/pigeon-api.md): every frame ends delivered or
 // in a named drop counter — consumer, ttl, overflow, no-consumer, trunk.
 //
@@ -37,6 +42,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -106,8 +112,9 @@ type bufFrame struct {
 }
 
 type peerConn struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu      sync.Mutex
+	conn    *websocket.Conn
+	lastLog time.Time // rate-limit "peer unreachable" narration
 }
 
 type Loft struct {
@@ -126,6 +133,11 @@ type Loft struct {
 	observers map[*websocket.Conn]*sync.Mutex
 	noGame    uint64 // frames dropped: no router consumer anywhere
 	dropTrunk uint64 // frames lost to trunk/peer failures
+
+	// onLog narration to the consumer. Edge-triggered so a sustained overflow
+	// logs once, not once per shed frame.
+	overflowing     bool
+	lastOverflowLog time.Time
 
 	// gateway role
 	isGateway    bool
@@ -397,7 +409,17 @@ func (l *Loft) ingest(p *Port, frame []byte) {
 	}
 	if len(l.frames) >= maxBuffered {
 		p.dropsOverflow++
+		// Log the ONSET of shedding (edge-triggered, min 2s apart) so a
+		// consumer sees backpressure without a per-frame firehose under load.
+		onset := !l.overflowing && time.Since(l.lastOverflowLog) > 2*time.Second
+		if onset {
+			l.overflowing = true
+			l.lastOverflowLog = time.Now()
+		}
 		l.mu.Unlock()
+		if onset {
+			l.notifyLog("loft", fmt.Sprintf("buffer full (%d frames): shedding load — drops.overflow is climbing", maxBuffered))
+		}
 		return
 	}
 	fid := l.nextFID
@@ -405,7 +427,16 @@ func (l *Loft) ingest(p *Port, frame []byte) {
 	data := make([]byte, len(frame))
 	copy(data, frame)
 	l.frames[fid] = &bufFrame{port: p.ID, data: data, added: time.Now()}
+	// Recovered once the consumer has drained us well below the line (hysteresis
+	// at 3/4 so we don't flap onset/recovery around the threshold).
+	drained := l.overflowing && len(l.frames) < maxBuffered*3/4
+	if drained {
+		l.overflowing = false
+	}
 	l.mu.Unlock()
+	if drained {
+		l.notifyLog("loft", "buffer drained: accepting frames again")
+	}
 
 	tok := buildToken(p.ID, fid, uint32(len(data)), data)
 	if haveRouter {
@@ -592,21 +623,18 @@ func (l *Loft) attachConsumer(conn *websocket.Conn, observe bool) {
 		role = "observer"
 	}
 	log.Printf("%s connected from %s", role, conn.RemoteAddr())
-	data, _ := json.Marshal(hello)
-	if observe {
-		l.mu.Lock()
-		mu := l.observers[conn]
-		l.mu.Unlock()
-		if mu != nil {
-			mu.Lock()
-			conn.WriteMessage(websocket.TextMessage, data)
-			mu.Unlock()
-		}
-	} else {
-		l.cwmu.Lock()
-		conn.WriteMessage(websocket.TextMessage, data)
-		l.cwmu.Unlock()
-	}
+	helloData, _ := json.Marshal(hello)
+	l.sendTextTo(conn, observe, helloData)
+
+	// A greeting log line, to this consumer only: guarantees onLog fires on the
+	// live path (the loft is a frame plane — it narrates what it actually sees:
+	// who it is, backpressure, peer health; not ARP/ping, which it can't read).
+	nPorts := len(hello["ports"].([]any))
+	greet, _ := json.Marshal(map[string]any{
+		"type": "log", "who": "loft",
+		"line": fmt.Sprintf("attached to node %q as %s — %d port(s) in view", l.node, role, nPorts),
+	})
+	l.sendTextTo(conn, observe, greet)
 
 	for {
 		mt, data, err := conn.ReadMessage()
@@ -773,6 +801,7 @@ func (l *Loft) peerSend(addr string, portID uint16, frame []byte) {
 			l.dropTrunk++
 			l.mu.Unlock()
 			log.Printf("peer %s unreachable: %v", addr, err)
+			l.peerLogLocked(pc, fmt.Sprintf("peer %s unreachable — cross-node frames dropping (drops.trunk)", addr))
 			return
 		}
 		pc.conn = conn
@@ -788,7 +817,18 @@ func (l *Loft) peerSend(addr string, portID uint16, frame []byte) {
 		l.dropTrunk++
 		l.mu.Unlock()
 		log.Printf("peer %s write failed: %v", addr, err)
+		l.peerLogLocked(pc, fmt.Sprintf("peer %s write failed — cross-node frames dropping (drops.trunk)", addr))
 	}
+}
+
+// peerLogLocked narrates a peer failure at most once per 5s per peer. Caller
+// holds pc.mu (but NOT l.mu — notifyLog grabs l.mu itself).
+func (l *Loft) peerLogLocked(pc *peerConn, line string) {
+	if time.Since(pc.lastLog) < 5*time.Second {
+		return
+	}
+	pc.lastLog = time.Now()
+	l.notifyLog("loft", line)
 }
 
 // ---- housekeeping & stats -----------------------------------------------------
@@ -885,6 +925,33 @@ func (l *Loft) notifyJSON(v any) {
 	data, _ := json.Marshal(v)
 	l.sendTextToRouter(data)
 	l.broadcastObserversText(data)
+}
+
+// notifyLog narrates an operational event to the consumer (onLog). Reserved for
+// things the loft genuinely observes and that aren't already a typed control
+// message — keep it low-frequency (see the overflow edge-trigger, peer rate
+// limit). MUST be called without l.mu held.
+func (l *Loft) notifyLog(who, line string) {
+	l.notifyJSON(map[string]any{"type": "log", "who": who, "line": line})
+}
+
+// sendTextTo writes one text frame to a single consumer, taking the right lock
+// for its role (the exclusive router vs. a specific observer).
+func (l *Loft) sendTextTo(conn *websocket.Conn, observe bool, data []byte) {
+	if observe {
+		l.mu.Lock()
+		mu := l.observers[conn]
+		l.mu.Unlock()
+		if mu != nil {
+			mu.Lock()
+			conn.WriteMessage(websocket.TextMessage, data)
+			mu.Unlock()
+		}
+	} else {
+		l.cwmu.Lock()
+		conn.WriteMessage(websocket.TextMessage, data)
+		l.cwmu.Unlock()
+	}
 }
 
 func (l *Loft) broadcastObservers(data []byte) {

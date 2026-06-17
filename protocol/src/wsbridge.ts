@@ -4,7 +4,7 @@
 //   0x01 token    loftd -> game  [1][u16 port][u32 frameId][u32 fullLen][snapshot...]
 //   0x02 deliver  game -> loftd  [1][u16 egressPort][u32 frameId]
 //   0x03 drop     game -> loftd  [1][u16 0][u32 frameId]
-// Text: JSON control (hello / port-added / port-removed / stats).
+// Text: JSON control (hello / port-added / port-removed / stats / log).
 import type { Bridge, BridgeEvents, PortInfo } from './types';
 
 const MSG_TOKEN = 0x01;
@@ -93,6 +93,12 @@ export class WsBridge implements Bridge {
           droppedNoConsumer: msg.droppedNoConsumer ?? 0,
           ports: msg.ports ?? {},
         });
+        break;
+      case 'log':
+        // Operational narration from the loft (attach greeting, backpressure,
+        // peer health). The loft routes on headers, so it never narrates
+        // ARP/ping — that's the sim's job.
+        this.events.onLog(msg.who ?? 'loft', msg.line ?? '');
         break;
     }
   }

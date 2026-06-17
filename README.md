@@ -60,13 +60,15 @@ to loopback on Win/macOS; on Linux add `127.0.0.1 pigeon.localhost` to
 
 | Path        | What it is |
 |-------------|------------|
+| `protocol/` | `@pigeon/protocol` — the Pigeon API as a TypeScript library: wire types, frame decode, and the loft consumer bridge (live + offline sim). Both webapps build on exactly this. **[Start here to build your own visualizer.](protocol/README.md)** |
 | `game/`     | TypeScript + three.js webapp. Factory floor (belts, crossings, filters, hubs, multi-port switches, meters, MIDI, learn/lookup primitives) + **Hosts / Network / VPN / Speedtest / Health** tabs. |
+| `ballpit/`  | A second visualizer on the same `@pigeon/protocol` engine — a Rokenbok-style ball factory; tokens pour in as physics balls you route into sinks. CPU (Rapier) or GPU MLS-MPM fluid backend. See [docs/ballpit.md](docs/ballpit.md). |
 | `bridge/`   | One Go module. `loftd` (AF_PACKET tap + token protocol + multi-node trunks), `pigeon-cni` (dual-mode CNI), and the external-host agents: `perch`, `wggw` (WireGuard), `tunbridge` (IKEv2/VPN), `uplink` (NAT to the world). |
 | `tower/`    | In-cluster admin service: health, kubelet usage, runtime host spawning, periodic workloads, live pod shells, and the iperf3 speedtest. |
 | `tools/`    | `autoroute.mjs` — headless MAC-learning consumer (the "it could be scripts" proof, and the bench workhorse). |
 | `cluster/`  | `up.ps1 -Workers 2` / `down.ps1` Talos lifecycle + all manifests. |
 | `gitops/`   | ArgoCD app-of-apps. `up.ps1 -GitRepo <url>` points ArgoCD at your remote. |
-| `docs/`     | [architecture](docs/architecture.md), the [Pigeon API](docs/pigeon-api.md) contract, [benchmarks](docs/benchmarks.md), [edge/VPN](docs/edge.md), [uplink](docs/uplink.md). |
+| `docs/`     | [architecture](docs/architecture.md), the [Pigeon API wire contract](docs/pigeon-api.md) (+ the [consumer SDK guide](protocol/README.md)), [ballpit](docs/ballpit.md), [benchmarks](docs/benchmarks.md), [edge/VPN](docs/edge.md), [uplink](docs/uplink.md). |
 
 ## Bring real hosts in, and route out to the world
 
